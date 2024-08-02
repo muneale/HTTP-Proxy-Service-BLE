@@ -1,0 +1,8 @@
+- Service refactor to organize better the code
+- Implement HTTPS security option
+- Implement feature to read/write more bytes than what the MTU allows
+- Log in a better way than println
+- Add params to allow bash args input like timeout, service name etc
+- Implement multiple requests based on device ID (like obj UserRequest that contains each Vec, then a HashMap<BLE_UUID, UserRequest>)
+- Check if a request is already running
+- Modify the way how the service is closed (now it closes when press enter)
