@@ -2,19 +2,28 @@
 
 use bluer::{
     adv::Advertisement,
-    gatt::local::{Application, Characteristic, CharacteristicNotify, CharacteristicNotifyMethod, CharacteristicRead, CharacteristicWrite, CharacteristicWriteMethod, Service},
+    gatt::local::{
+        Application,
+        Characteristic,
+        CharacteristicNotify,
+        CharacteristicNotifyMethod,
+        CharacteristicRead,
+        CharacteristicWrite,
+        CharacteristicWriteMethod,
+        Service
+    },
     UuidExt,
 };
+use byteorder::{LittleEndian, WriteBytesExt};
 use futures::FutureExt;
+use reqwest::{Method, Response};
 use std::{sync::Arc, time::Duration};
+use substring::Substring;
 use tokio::{
-    io::{AsyncBufReadExt, BufReader},
     sync::Mutex,
     time::sleep,
+    signal::unix::{signal, SignalKind}
 };
-use reqwest::{Method, Response};
-use substring::Substring;
-use byteorder::{LittleEndian, WriteBytesExt};
 
 
 #[derive(Clone, Debug, Copy)]
@@ -434,15 +443,20 @@ async fn main() -> bluer::Result<()> {
     };
     let app_handle = adapter.serve_gatt_application(app).await?;
 
-    println!("Service ready. Press enter to quit.");
-    let stdin = BufReader::new(tokio::io::stdin());
-    let mut lines = stdin.lines();
-    let _ = lines.next_line().await;
+    println!("Service ready.");
+
+    // Graceful shutdown when sigint or sigterm are received
+    let mut signal_terminate = signal(SignalKind::terminate())?;
+    let mut signal_interrupt = signal(SignalKind::interrupt())?;
+    tokio::select! {
+        _ = signal_terminate.recv() => println!("Received SIGTERM"),
+        _ = signal_interrupt.recv() => println!("Received SIGINT"),
+    };
 
     println!("Removing service and advertisement");
     drop(app_handle);
     drop(adv_handle);
     sleep(Duration::from_secs(1)).await;
-
+    
     Ok(())
 }
