@@ -16,8 +16,9 @@ use bluer::{
 };
 use byteorder::{LittleEndian, WriteBytesExt};
 use futures::FutureExt;
+use log::{debug, error, info};
 use reqwest::{Method, Response};
-use std::{sync::Arc, time::Duration};
+use std::{env, sync::Arc, time::Duration};
 use substring::Substring;
 use tokio::{
     sync::Mutex,
@@ -98,7 +99,7 @@ async fn main() -> bluer::Result<()> {
     let adapter = session.default_adapter().await?;
     adapter.set_powered(true).await?;
 
-    println!("Advertising on Bluetooth adapter {} with address {}", adapter.name(), adapter.address().await?);
+    info!("Advertising on Bluetooth adapter {} with address {}", adapter.name(), adapter.address().await?);
     let le_advertisement = Advertisement {
         service_uuids: vec![service_uuid].into_iter().collect(),
         discoverable: Some(true),
@@ -107,7 +108,7 @@ async fn main() -> bluer::Result<()> {
     };
     let adv_handle = adapter.advertise(le_advertisement).await?;
 
-    println!("Serving GATT echo service on Bluetooth adapter {}", adapter.name());
+    info!("Serving GATT echo service on Bluetooth adapter {}", adapter.name());
     
     let http_uri: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
     let http_uri_read = http_uri.clone();
@@ -147,7 +148,7 @@ async fn main() -> bluer::Result<()> {
                             let value = http_uri_read.clone();
                             async move {
                                 let value = value.lock().await.clone();
-                                println!("Read request {:?} with value {:x?}", &req, &value);
+                                debug!("Read request {:?} with value {:x?}", &req, &value);
                                 Ok(value)
                             }
                             .boxed()
@@ -160,7 +161,7 @@ async fn main() -> bluer::Result<()> {
                         method: CharacteristicWriteMethod::Fun(Box::new(move |new_value, req| {
                             let value = http_uri_write.clone();
                             async move {
-                                println!("Write request {:?} with value {:x?}", &req, &new_value);
+                                debug!("Write request {:?} with value {:x?}", &req, &new_value);
                                 let mut value = value.lock().await;
                                 *value = new_value;
                                 Ok(())
@@ -179,7 +180,7 @@ async fn main() -> bluer::Result<()> {
                             let value = http_headers_read.clone();
                             async move {
                                 let value = value.lock().await.clone();
-                                println!("Read request {:?} with value {:x?}", &req, &value);
+                                debug!("Read request {:?} with value {:x?}", &req, &value);
                                 Ok(value)
                             }
                             .boxed()
@@ -192,7 +193,7 @@ async fn main() -> bluer::Result<()> {
                         method: CharacteristicWriteMethod::Fun(Box::new(move |new_value, req| {
                             let value = http_headers_write.clone();
                             async move {
-                                println!("Write request {:?} with value {:x?}", &req, &new_value);
+                                debug!("Write request {:?} with value {:x?}", &req, &new_value);
                                 let mut value = value.lock().await;
                                 *value = new_value;
                                 Ok(())
@@ -211,7 +212,7 @@ async fn main() -> bluer::Result<()> {
                             let value = http_status_code_read.clone();
                             async move {
                                 let value = value.lock().await.clone();
-                                println!("Read request {:?} with value {:x?}", &req, &value);
+                                debug!("Read request {:?} with value {:x?}", &req, &value);
                                 Ok(value)
                             }
                             .boxed()
@@ -224,22 +225,22 @@ async fn main() -> bluer::Result<()> {
                             let value = http_status_code_notify.clone();
                             async move {
                                 tokio::spawn(async move {
-                                    println!(
+                                    debug!(
                                         "Notification session start with confirming={:?}",
                                         notifier.confirming()
                                     );
                                     loop {
                                         {
                                             let value = value.lock().await;
-                                            println!("Notifying with value {:x?}", &*value);
+                                            debug!("Notifying with value {:x?}", &*value);
                                             if let Err(err) = notifier.notify(value.to_vec()).await {
-                                                println!("Notification error: {}", &err);
+                                                error!("Notification error: {}", &err);
                                                 break;
                                             }
                                         }
                                         sleep(Duration::from_secs(5)).await;
                                     }
-                                    println!("Notification session stop");
+                                    debug!("Notification session stop");
                                 });
                             }
                             .boxed()
@@ -256,7 +257,7 @@ async fn main() -> bluer::Result<()> {
                             let value = http_entity_body_read.clone();
                             async move {
                                 let value = value.lock().await.clone();
-                                println!("Read request {:?} with value {:x?}", &req, &value);
+                                debug!("Read request {:?} with value {:x?}", &req, &value);
                                 Ok(value)
                             }
                             .boxed()
@@ -269,7 +270,7 @@ async fn main() -> bluer::Result<()> {
                         method: CharacteristicWriteMethod::Fun(Box::new(move |new_value, req| {
                             let value = http_entity_body_write.clone();
                             async move {
-                                println!("Write request {:?} with value {:x?}", &req, &new_value);
+                                debug!("Write request {:?} with value {:x?}", &req, &new_value);
                                 let mut value = value.lock().await;
                                 *value = new_value;
                                 Ok(())
@@ -288,7 +289,7 @@ async fn main() -> bluer::Result<()> {
                             let value = https_security_read.clone();
                             async move {
                                 let value = value.lock().await.clone();
-                                println!("Read request {:?} with value {:x?}", &req, &value);
+                                debug!("Read request {:?} with value {:x?}", &req, &value);
                                 Ok(value)
                             }
                             .boxed()
@@ -325,23 +326,23 @@ async fn main() -> bluer::Result<()> {
                                             HttpControlOption::SecurePut => { method = Method::PUT; protocol = "https"; },
                                             HttpControlOption::SecureDelete => { method = Method::DELETE; protocol = "https"; },
                                             _ => { 
-                                                println!("Invalid method");
+                                                error!("Invalid method");
                                                 return Ok(());
                                             },
                                         }
                                     },
                                     None => {
-                                        println!("No number has been provided");
+                                        error!("No number has been provided");
                                         return Ok(());
                                     },
                                 }
-                                println!("Method: '{}', Protocol: '{}'", method, protocol);
+                                debug!("Method: '{}', Protocol: '{}'", method, protocol);
 
                                 // URL
                                 let address = match String::from_utf8(byte_uri.lock().await.to_vec()) {
                                     Ok(string) => string,
                                     Err(e) => {
-                                        println!("Unable to parse uri as string. Reason: {}", e);
+                                        error!("Unable to parse uri as string. Reason: {}", e);
                                         String::new()
                                     },
                                 };
@@ -349,14 +350,14 @@ async fn main() -> bluer::Result<()> {
                                     return Ok(())
                                 }
                                 let url = format!("{}://{}", protocol, address);
-                                println!("Sending request to '{}'", url);
+                                debug!("Sending request to '{}'", url);
 
                                 // Headers
                                 let headers: String;
                                 match String::from_utf8(byte_headers.lock().await.to_vec()) {
                                     Ok(s) => headers = s,
                                     Err(e) => {
-                                        println!("Unable to parse headers as string. Reason: {}", e);
+                                        error!("Unable to parse headers as string. Reason: {}", e);
                                         return Ok(());
                                     },
                                 };
@@ -370,7 +371,7 @@ async fn main() -> bluer::Result<()> {
                                     };
                                     let header_key = h.substring(0, i).trim().to_string();
                                     let header_value = h.substring(i+1, h.len()).trim().to_string();
-                                    println!("Header: '{}: {}'", header_key, header_value);
+                                    debug!("Header: '{}: {}'", header_key, header_value);
                                     req_builder = req_builder.header(header_key, header_value);
                                 }
 
@@ -379,11 +380,11 @@ async fn main() -> bluer::Result<()> {
                                 match String::from_utf8(byte_body.lock().await.to_vec()) {
                                     Ok(s) => body = s,
                                     Err(e) => {
-                                        println!("Unable to parse body as string. Reason: {}", e);
+                                        error!("Unable to parse body as string. Reason: {}", e);
                                         return Ok(());
                                     },
                                 };
-                                println!("Body: '{}'", body);
+                                debug!("Body: '{}'", body);
                                 if body != "" {
                                     req_builder = req_builder.body(body);
                                 }
@@ -393,11 +394,11 @@ async fn main() -> bluer::Result<()> {
                                 match req_builder.send().await {
                                     Ok(r) => res = r,
                                     Err(e) => {
-                                        println!("Unable to send the request. Reason: {}", e);
+                                        error!("Unable to send the request. Reason: {}", e);
                                         return Ok(());
                                     }
                                 };
-                                println!("Response: {:?}", &res);
+                                debug!("Response: {:?}", &res);
 
                                 let mut status = Vec::new();
                                 status.write_u16::<LittleEndian>(res.status().into()).unwrap();
@@ -416,7 +417,7 @@ async fn main() -> bluer::Result<()> {
                                 *body_values = match &res.bytes().await {
                                     Ok(b) => b.to_vec(),
                                     Err(e) => {
-                                        println!("Unable to parse response body. Reason: {}", e);
+                                        error!("Unable to parse response body. Reason: {}", e);
                                         return Ok(());
                                     } 
                                 };
@@ -427,7 +428,7 @@ async fn main() -> bluer::Result<()> {
                                 let mut status_values = byte_status.lock().await;
                                 *status_values = status;
 
-                                println!("Write request {:?} with value {:x?}", &req, &new_value);
+                                debug!("Write request {:?} with value {:x?}", &req, &new_value);
 
                                 Ok(())
                             }.boxed()
@@ -443,17 +444,17 @@ async fn main() -> bluer::Result<()> {
     };
     let app_handle = adapter.serve_gatt_application(app).await?;
 
-    println!("Service ready.");
+    info!("Service ready.");
 
     // Graceful shutdown when sigint or sigterm are received
     let mut signal_terminate = signal(SignalKind::terminate())?;
     let mut signal_interrupt = signal(SignalKind::interrupt())?;
     tokio::select! {
-        _ = signal_terminate.recv() => println!("Received SIGTERM"),
-        _ = signal_interrupt.recv() => println!("Received SIGINT"),
+        _ = signal_terminate.recv() => info!("Received SIGTERM"),
+        _ = signal_interrupt.recv() => info!("Received SIGINT"),
     };
 
-    println!("Removing service and advertisement");
+    info!("Removing service and advertisement");
     drop(app_handle);
     drop(adv_handle);
     sleep(Duration::from_secs(1)).await;
