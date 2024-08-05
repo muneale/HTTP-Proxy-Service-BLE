@@ -86,6 +86,19 @@ enum HttpDataStatusBit {
 async fn main() -> bluer::Result<()> {
     env_logger::init();
 
+    let cmd = clap::Command::new("cargo")
+        .bin_name("cargo")
+        .subcommand_required(true)
+        .subcommand(
+        clap::command!("example").arg(
+            clap::arg!(--"manifest-path" <PATH>)
+                .value_parser(clap::value_parser!(std::path::PathBuf)),
+        ),
+    );
+    let matches = cmd.get_matches();
+
+    return Ok(());
+
     let service_uuid = uuid::Uuid::from_u16(0x1823); // HTTP Proxy Service
     let http_uri_uuid = uuid::Uuid::from_u16(0x2AB6);
     let http_headers_uuid = uuid::Uuid::from_u16(0x2AB7);
