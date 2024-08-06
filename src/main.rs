@@ -15,10 +15,11 @@ use bluer::{
     UuidExt,
 };
 use byteorder::{LittleEndian, WriteBytesExt};
+use clap::Parser;
 use futures::FutureExt;
 use log::{debug, error, info};
 use reqwest::{Method, Response};
-use std::{env, sync::Arc, time::Duration};
+use std::{sync::Arc, time::Duration};
 use substring::Substring;
 use tokio::{
     sync::Mutex,
@@ -82,22 +83,20 @@ enum HttpDataStatusBit {
 }
 
 
+#[derive(Parser)]
+#[command(author, version, about, long_about = None)]
+struct Args {
+    #[arg(short, long, default_value = "Logbot-HPS", help = "Service name")]
+    name: String,
+    #[arg(short, long, default_value = "60", help = "HTTP requests timeout in seconds")]
+    timeout: u64,
+}
+
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> bluer::Result<()> {
     env_logger::init();
 
-    let cmd = clap::Command::new("cargo")
-        .bin_name("cargo")
-        .subcommand_required(true)
-        .subcommand(
-        clap::command!("example").arg(
-            clap::arg!(--"manifest-path" <PATH>)
-                .value_parser(clap::value_parser!(std::path::PathBuf)),
-        ),
-    );
-    let matches = cmd.get_matches();
-
-    return Ok(());
+    let args = Args::parse();
 
     let service_uuid = uuid::Uuid::from_u16(0x1823); // HTTP Proxy Service
     let http_uri_uuid = uuid::Uuid::from_u16(0x2AB6);
@@ -116,7 +115,7 @@ async fn main() -> bluer::Result<()> {
     let le_advertisement = Advertisement {
         service_uuids: vec![service_uuid].into_iter().collect(),
         discoverable: Some(true),
-        local_name: Some("gatt_hps_server".to_string()),
+        local_name: Some(args.name.to_string()),
         ..Default::default()
     };
     let adv_handle = adapter.advertise(le_advertisement).await?;
@@ -146,7 +145,7 @@ async fn main() -> bluer::Result<()> {
     let http_control_point_headers = http_headers.clone();
     let http_control_point_status_code = http_status_code.clone();
     let http_control_point_entity_body = http_entity_body.clone();
-    let http_control_point_security = https_security.clone();
+    let _http_control_point_security = https_security.clone();
     
     let app = Application {
         services: vec![Service {
@@ -376,7 +375,7 @@ async fn main() -> bluer::Result<()> {
                                 };
 
                                 let client = reqwest::Client::new();
-                                let mut req_builder = client.request(method, url).timeout(Duration::new(60, 0));
+                                let mut req_builder = client.request(method, url).timeout(Duration::new(args.timeout, 0));
                                 for h in headers.split("\r\n") {
                                     let i = match h.find(":") {
                                         Some(k) => k.try_into().unwrap(),
