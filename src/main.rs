@@ -20,7 +20,7 @@ use env_logger::Env;
 use futures::FutureExt;
 use log::{debug, error, info};
 use reqwest::{Method, Response};
-use std::{sync::Arc, time::Duration};
+use std::{str::FromStr, sync::Arc, time::Duration};
 use substring::Substring;
 use tokio::{
     sync::Mutex,
@@ -106,7 +106,8 @@ async fn main() -> bluer::Result<()> {
     let http_entity_body_uuid = uuid::Uuid::from_u16(0x2AB9);
     let http_control_point_uuid = uuid::Uuid::from_u16(0x2ABA);
     let https_security_uuid = uuid::Uuid::from_u16(0x2ABB);
-
+    let http_headers_body_chunk_idx_uuid = uuid::Uuid::from_str("5d8a3fbc-ceb3-4293-98b1-76dbb4cbdde0").unwrap();
+    let http_headers_body_sizes_uuid = uuid::Uuid::from_str("5d8a3fbc-ceb3-4293-98b1-76dbb4cbdde1").unwrap();
 
     let session: bluer::Session = bluer::Session::new().await?;
     let adapter = session.default_adapter().await?;
@@ -127,9 +128,17 @@ async fn main() -> bluer::Result<()> {
     let http_uri_read = http_uri.clone();
     let http_uri_write = http_uri.clone();
 
+    let http_headers_body_chunk_idx: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new([0, 0, 0, 0, 0, 0, 0, 0].to_vec()));
+    let http_headers_body_chunk_idx_read: Arc<Mutex<Vec<u8>>> = http_headers_body_chunk_idx.clone();
+    let http_headers_body_chunk_idx_write: Arc<Mutex<Vec<u8>>> = http_headers_body_chunk_idx.clone();
+
+    let http_headers_body_sizes: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
+    let http_headers_body_sizes_read: Arc<Mutex<Vec<u8>>> = http_headers_body_sizes.clone();
+
     let http_headers: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
     let http_headers_read = http_headers.clone();
     let http_headers_write = http_headers.clone();
+    let http_headers_chunk_idx = http_headers_body_chunk_idx.clone();
 
     let http_status_code: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
     let http_status_code_read = http_status_code.clone();
@@ -138,6 +147,7 @@ async fn main() -> bluer::Result<()> {
     let http_entity_body: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
     let http_entity_body_read = http_entity_body.clone();
     let http_entity_body_write = http_entity_body.clone();
+    let http_entity_body_chunk_idx = http_headers_body_chunk_idx.clone();
 
     let https_security: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
     let https_security_read = https_security.clone();
@@ -147,12 +157,63 @@ async fn main() -> bluer::Result<()> {
     let http_control_point_status_code = http_status_code.clone();
     let http_control_point_entity_body = http_entity_body.clone();
     let _http_control_point_security = https_security.clone();
+    let http_control_point_headers_body_sizes = http_headers_body_sizes.clone();
+    let http_control_point_headers_body_chunk_idx = http_headers_body_chunk_idx.clone();
     
     let app = Application {
         services: vec![Service {
             uuid: service_uuid,
             primary: true,
             characteristics: vec![
+                Characteristic {
+                    uuid: http_headers_body_sizes_uuid,
+                    read: Some(CharacteristicRead {
+                        read: true,
+                        fun: Box::new(move |req| {
+                            let value = http_headers_body_sizes_read.clone();
+                            async move {
+                                let value = value.lock().await.clone();
+                                debug!("Read request {:?} with value {:x?}", &req, &value);
+                                Ok(value)
+                            }
+                            .boxed()
+                        }),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+                Characteristic {
+                    uuid: http_headers_body_chunk_idx_uuid,
+                    read: Some(CharacteristicRead {
+                        read: true,
+                        fun: Box::new(move |req| {
+                            let value = http_headers_body_chunk_idx_read.clone();
+                            async move {
+                                let value = value.lock().await.clone();
+                                debug!("Read request {:?} with value {:x?}", &req, &value);
+                                Ok(value)
+                            }
+                            .boxed()
+                        }),
+                        ..Default::default()
+                    }),
+                    write: Some(CharacteristicWrite {
+                        write: true,
+                        write_without_response: true,
+                        method: CharacteristicWriteMethod::Fun(Box::new(move |new_value, req| {
+                            let value = http_headers_body_chunk_idx_write.clone();
+                            async move {
+                                debug!("Write request {:?} with value {:x?}", &req, &new_value);
+                                let mut value = value.lock().await;
+                                *value = new_value;
+                                Ok(())
+                            }
+                            .boxed()
+                        })),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
                 Characteristic {
                     uuid: http_uri_uuid,
                     read: Some(CharacteristicRead {
@@ -191,10 +252,25 @@ async fn main() -> bluer::Result<()> {
                         read: true,
                         fun: Box::new(move |req| {
                             let value = http_headers_read.clone();
+                            let headers_idx = http_headers_chunk_idx.clone();
+                            let mtu = req.mtu as usize - 5;
                             async move {
                                 let value = value.lock().await.clone();
-                                debug!("Read request {:?} with value {:x?}", &req, &value);
-                                Ok(value)
+                                let headers_idx = headers_idx.lock().await.clone();
+                                let len = value.len() as usize;
+                                if len <= mtu {
+                                    return Ok(value)
+                                }
+                                let idx = if headers_idx.len() >= 4 {
+                                    u32::from_le_bytes(headers_idx[0..4].try_into().unwrap())
+                                } else { 
+                                    0
+                                } as usize;
+                                let start = if (idx * mtu) < len { idx * mtu } else { 0 };
+                                let end = if ((idx + 1) * mtu) < len { (idx + 1) * mtu } else { len };
+                                let truncated_value = value[start..end].to_vec();
+                                debug!("Read request {:?} with value {:x?}", &req, &truncated_value);
+                                Ok(truncated_value)
                             }
                             .boxed()
                         }),
@@ -268,10 +344,25 @@ async fn main() -> bluer::Result<()> {
                         read: true,
                         fun: Box::new(move |req| {
                             let value = http_entity_body_read.clone();
+                            let body_idx = http_entity_body_chunk_idx.clone();
+                            let mtu = req.mtu as usize - 5;
                             async move {
                                 let value = value.lock().await.clone();
-                                debug!("Read request {:?} with value {:x?}", &req, &value);
-                                Ok(value)
+                                let body_idx = body_idx.lock().await.clone();
+                                let len = value.len() as usize;
+                                if len <= mtu {
+                                    return Ok(value)
+                                }
+                                let idx = if body_idx.len() >= 8 {
+                                    u32::from_le_bytes(body_idx[4..8].try_into().unwrap()) 
+                                } else { 
+                                    0
+                                } as usize;
+                                let start = if (idx * mtu) < len { idx * mtu } else { 0 };
+                                let end = if ((idx + 1) * mtu) < len { (idx + 1) * mtu } else { len };
+                                let truncated_value = value[start..end].to_vec();
+                                debug!("Read request {:?} with value {:x?}", &req, &truncated_value);
+                                Ok(truncated_value)
                             }
                             .boxed()
                         }),
@@ -321,6 +412,8 @@ async fn main() -> bluer::Result<()> {
                             let byte_headers = http_control_point_headers.clone();
                             let byte_body = http_control_point_entity_body.clone();
                             let byte_status = http_control_point_status_code.clone();
+                            let byte_headers_body_sizes = http_control_point_headers_body_sizes.clone();
+                            let byte_chunk_idx = http_control_point_headers_body_chunk_idx.clone();
                             async move {
                                 // Method and protocol
                                 let method: Method;
@@ -423,7 +516,7 @@ async fn main() -> bluer::Result<()> {
                                 }
                                 let mut header_values = byte_headers.lock().await;
                                 *header_values = headers_str.as_bytes().to_vec();
-                                let headers_status = if header_values.len() <= req.mtu.into() { HttpDataStatusBit::HeadersReceived as u8 } else { HttpDataStatusBit::HeadersTruncated as u8 };
+                                let headers_status = if header_values.len() <= (req.mtu as usize - 5) { HttpDataStatusBit::HeadersReceived as u8 } else { HttpDataStatusBit::HeadersTruncated as u8 };
 
                                 // Write body into buffer
                                 let mut body_values = byte_body.lock().await;
@@ -434,7 +527,22 @@ async fn main() -> bluer::Result<()> {
                                         return Ok(());
                                     } 
                                 };
-                                let body_status = if body_values.len() <= req.mtu.into() { HttpDataStatusBit::BodyReceived as u8 } else { HttpDataStatusBit::BodyTruncated as u8 };
+
+                                // Set headers and body sizes
+                                let mut headers_body_sizes = Vec::new();
+                                headers_body_sizes.write_u32::<LittleEndian>(header_values.len().try_into().unwrap()).unwrap();
+                                headers_body_sizes.write_u32::<LittleEndian>(body_values.len().try_into().unwrap()).unwrap();
+                                let mut byte_headers_body_sizes_values = byte_headers_body_sizes.lock().await;
+                                *byte_headers_body_sizes_values = headers_body_sizes;
+
+                                // Set chunk indexes to 0
+                                let mut chunk_idxs_values = Vec::new();
+                                chunk_idxs_values.write_u32::<LittleEndian>(0).unwrap();
+                                chunk_idxs_values.write_u32::<LittleEndian>(0).unwrap();
+                                let mut chunk_idxs = byte_chunk_idx.lock().await;
+                                *chunk_idxs = chunk_idxs_values;
+
+                                let body_status = if body_values.len() <= (req.mtu as usize - 5) { HttpDataStatusBit::BodyReceived as u8 } else { HttpDataStatusBit::BodyTruncated as u8 };
                                 status.write_u8(headers_status | body_status).unwrap();
                                 
                                 // Write HTTP response code
