@@ -16,6 +16,7 @@ use bluer::{
 };
 use byteorder::{LittleEndian, WriteBytesExt};
 use clap::Parser;
+use env_logger::Env;
 use futures::FutureExt;
 use log::{debug, error, info};
 use reqwest::{Method, Response};
@@ -94,7 +95,7 @@ struct Args {
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> bluer::Result<()> {
-    env_logger::init();
+    env_logger::Builder::from_env(Env::default().default_filter_or("info")).init();
 
     let args = Args::parse();
 
