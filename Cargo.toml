@@ -1,5 +1,5 @@
 [package]
-name = "http-proxy-service-ble"
+name = "hps-ble"
 version = "0.1.0"
 edition = "2021"
 authors = ["Alessio Munerato"]
