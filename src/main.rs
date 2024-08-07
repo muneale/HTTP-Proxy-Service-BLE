@@ -3,86 +3,66 @@
 use bluer::{
     adv::Advertisement,
     gatt::local::{
-        Application,
-        Characteristic,
-        CharacteristicNotify,
-        CharacteristicNotifyMethod,
-        CharacteristicRead,
-        CharacteristicWrite,
-        CharacteristicWriteMethod,
-        Service
+        Application, Characteristic, CharacteristicNotify, CharacteristicNotifyMethod,
+        CharacteristicRead, CharacteristicWrite, CharacteristicWriteMethod, Service,
     },
     UuidExt,
 };
 use byteorder::{LittleEndian, WriteBytesExt};
 use clap::Parser;
-use env_logger::Env;
 use futures::FutureExt;
-use log::{debug, error, info};
-use reqwest::{Method, Response};
-use std::{str::FromStr, sync::Arc, time::Duration};
-use substring::Substring;
+use num_derive::FromPrimitive;
+use num_traits::FromPrimitive;
+use once_cell::sync::Lazy;
+use reqwest::Method;
+use std::{sync::Arc, time::Duration};
+use thiserror::Error;
 use tokio::{
+    signal::unix::{signal, SignalKind},
     sync::Mutex,
     time::sleep,
-    signal::unix::{signal, SignalKind}
 };
+use tracing::{debug, error, info};
 
+// Constants
+const MTU_OVERHEAD: usize = 3;
+static SERVICE_UUID: Lazy<uuid::Uuid> = Lazy::new(|| uuid::Uuid::from_u16(0x1823));
+static HTTP_URI_UUID: Lazy<uuid::Uuid> = Lazy::new(|| uuid::Uuid::from_u16(0x2AB6));
+static HTTP_HEADERS_UUID: Lazy<uuid::Uuid> = Lazy::new(|| uuid::Uuid::from_u16(0x2AB7));
+static HTTP_STATUS_CODE_UUID: Lazy<uuid::Uuid> = Lazy::new(|| uuid::Uuid::from_u16(0x2AB8));
+static HTTP_ENTITY_BODY_UUID: Lazy<uuid::Uuid> = Lazy::new(|| uuid::Uuid::from_u16(0x2AB9));
+static HTTP_CONTROL_POINT_UUID: Lazy<uuid::Uuid> = Lazy::new(|| uuid::Uuid::from_u16(0x2ABA));
+static HTTPS_SECURITY_UUID: Lazy<uuid::Uuid> = Lazy::new(|| uuid::Uuid::from_u16(0x2ABB));
+static HTTP_HEADERS_BODY_CHUNK_IDX_UUID: Lazy<uuid::Uuid> = Lazy::new(|| uuid::Uuid::from_u16(0x2A9A));
+static HTTP_HEADERS_BODY_SIZES_UUID: Lazy<uuid::Uuid> = Lazy::new(|| uuid::Uuid::from_u16(0x2AC0));
+// Type aliases
+type SharedBuffer = Arc<Mutex<Vec<u8>>>;
 
-#[derive(Clone, Debug, Copy)]
+#[derive(Clone, Debug, Copy, FromPrimitive)]
 #[repr(u8)]
 enum HttpControlOption {
     Invalid = 0,
-    Get = 1, // HTTP GET Request	N/A	Initiates an HTTP GET Request.
-    Head = 2, //	HTTP HEAD Request	N/A	Initiates an HTTP HEAD Request.
-    Post = 3, //	HTTP POST Request	N/A	Initiates an HTTP POST Request.
-    Put = 4, //	HTTP PUT Request	N/A	Initiates an HTTP PUT Request.
-    Delete = 5, //	HTTP DELETE Request	N/A	Initiates an HTTP DELETE Request.
-    SecureGet = 6, //	HTTPS GET Request	N/A	Initiates an HTTPS GET Reques.t
-    SecureHead = 7, //	HTTPS HEAD Request	N/A	Initiates an HTTPS HEAD Request.
-    SecurePost = 8, //	HTTPS POST Request	N/A	Initiates an HTTPS POST Request.
-    SecurePut = 9, //	HTTPS PUT Request	N/A	Initiates an HTTPS PUT Request.
-    SecureDelete = 10, //	HTTPS DELETE Request	N/A	Initiates an HTTPS DELETE Request.
-    Cancel = 11, //	HTTP Request Cancel	N/A	Terminates any executing HTTP Request from the HPS Client.
-}
-
-impl HttpControlOption {
-    pub fn from_u8(i: u8) -> HttpControlOption {
-        match i {
-            1 => HttpControlOption::Get,
-            2 => HttpControlOption::Head,
-            3 => HttpControlOption::Post,
-            4 => HttpControlOption::Put,
-            5 => HttpControlOption::Delete,
-            6 => HttpControlOption::SecureGet,
-            7 => HttpControlOption::SecureHead,
-            8 => HttpControlOption::SecurePost,
-            9 => HttpControlOption::SecurePut,
-            10 => HttpControlOption::SecureDelete,
-            11 => HttpControlOption::Cancel,
-            _ => HttpControlOption::Invalid,
-        }
-    }
+    Get = 1,
+    Head = 2,
+    Post = 3,
+    Put = 4,
+    Delete = 5,
+    SecureGet = 6,
+    SecureHead = 7,
+    SecurePost = 8,
+    SecurePut = 9,
+    SecureDelete = 10,
+    Cancel = 11,
 }
 
 #[derive(Clone, Debug, Copy)]
 #[repr(u8)]
 enum HttpDataStatusBit {
-    // 3rd byte of http_status_code
-    HeadersReceived = 1, // Headers Received
-    // 0	The response-header and entity-header fields were not received in the HTTP response or stored in the HTTP Headers characteristic.
-    // 1	The response-header and entity-header fields were received in the HTTP response and stored in the HTTP Headers characteristic for the Client to read.
-    HeadersTruncated = 2, // Headers Truncated
-    // 0	Any received response-header and entity-header fields did not exceed 512 octets in length.
-    // 1	The response-header and entity-header fields exceeded 512 octets in length and the first 512 octets were saved in the HTTP Headers characteristic.
-    BodyReceived = 4, // Body Received
-    // 0	The entity-body field was not received in the HTTP response or stored in the HTTP Entity Body characteristic.
-    // 1	The entity-body field was received in the HTTP response and stored in the HTTP Entity Body characteristic for the Client to read.
-    BodyTruncated = 8, // Body Truncated
-    // 0	Any received entity-body field did not exceed 512 octets in length.
-    // 1	The entity-body field exceeded 512 octets in length and the first 512 octets were saved in the HTTP Headers characteristic
+    HeadersReceived = 1,
+    HeadersTruncated = 2,
+    BodyReceived = 4,
+    BodyTruncated = 8,
 }
-
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
@@ -93,492 +73,532 @@ struct Args {
     timeout: u64,
 }
 
+#[derive(Error, Debug)]
+enum AppError {
+    #[error("Bluetooth error: {0}")]
+    BluetoothError(#[from] bluer::Error),
+    #[error("HTTP request error: {0}")]
+    HttpError(#[from] reqwest::Error),
+    #[error("I/O error: {0}")]
+    IoError(#[from] std::io::Error),
+    #[error("UTF-8 conversion error: {0}")]
+    Utf8Error(#[from] std::string::FromUtf8Error),
+}
+
+struct AppState {
+    http_uri: SharedBuffer,
+    http_headers: SharedBuffer,
+    http_status_code: SharedBuffer,
+    http_entity_body: SharedBuffer,
+    https_security: SharedBuffer,
+    http_headers_body_chunk_idx: SharedBuffer,
+    http_headers_body_sizes: SharedBuffer,
+}
+
+impl AppState {
+    fn new() -> Self {
+        Self {
+            http_uri: Arc::new(Mutex::new(Vec::new())),
+            http_headers: Arc::new(Mutex::new(Vec::new())),
+            http_status_code: Arc::new(Mutex::new(Vec::new())),
+            http_entity_body: Arc::new(Mutex::new(Vec::new())),
+            https_security: Arc::new(Mutex::new(Vec::new())),
+            http_headers_body_chunk_idx: Arc::new(Mutex::new(vec![0; 8])),
+            http_headers_body_sizes: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+}
+
 #[tokio::main(flavor = "current_thread")]
-async fn main() -> bluer::Result<()> {
-    env_logger::Builder::from_env(Env::default().default_filter_or("info")).init();
+async fn main() -> Result<(), AppError> {
+    tracing_subscriber::fmt::init();
 
     let args = Args::parse();
 
-    let service_uuid = uuid::Uuid::from_u16(0x1823); // HTTP Proxy Service
-    let http_uri_uuid = uuid::Uuid::from_u16(0x2AB6);
-    let http_headers_uuid = uuid::Uuid::from_u16(0x2AB7);
-    let http_status_code_uuid = uuid::Uuid::from_u16(0x2AB8);
-    let http_entity_body_uuid = uuid::Uuid::from_u16(0x2AB9);
-    let http_control_point_uuid = uuid::Uuid::from_u16(0x2ABA);
-    let https_security_uuid = uuid::Uuid::from_u16(0x2ABB);
-    let http_headers_body_chunk_idx_uuid = uuid::Uuid::from_str("5d8a3fbc-ceb3-4293-98b1-76dbb4cbdde0").unwrap();
-    let http_headers_body_sizes_uuid = uuid::Uuid::from_str("5d8a3fbc-ceb3-4293-98b1-76dbb4cbdde1").unwrap();
-
-    let session: bluer::Session = bluer::Session::new().await?;
+    let session = bluer::Session::new().await?;
     let adapter = session.default_adapter().await?;
     adapter.set_powered(true).await?;
 
-    info!("Advertising on Bluetooth adapter {} with address {}", adapter.name(), adapter.address().await?);
+    info!(
+        "Advertising on Bluetooth adapter {} with address {}",
+        adapter.name(),
+        adapter.address().await?
+    );
+
     let le_advertisement = Advertisement {
-        service_uuids: vec![service_uuid].into_iter().collect(),
+        service_uuids: vec![*SERVICE_UUID].into_iter().collect(),
         discoverable: Some(true),
         local_name: Some(args.name.to_string()),
         ..Default::default()
     };
     let adv_handle = adapter.advertise(le_advertisement).await?;
 
-    info!("Serving GATT echo service on Bluetooth adapter {}", adapter.name());
-    
-    let http_uri: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
-    let http_uri_read = http_uri.clone();
-    let http_uri_write = http_uri.clone();
+    info!(
+        "Serving GATT echo service on Bluetooth adapter {}",
+        adapter.name()
+    );
 
-    let http_headers_body_chunk_idx: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new([0, 0, 0, 0, 0, 0, 0, 0].to_vec()));
-    let http_headers_body_chunk_idx_read: Arc<Mutex<Vec<u8>>> = http_headers_body_chunk_idx.clone();
-    let http_headers_body_chunk_idx_write: Arc<Mutex<Vec<u8>>> = http_headers_body_chunk_idx.clone();
+    let state = Arc::new(AppState::new());
 
-    let http_headers_body_sizes: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
-    let http_headers_body_sizes_read: Arc<Mutex<Vec<u8>>> = http_headers_body_sizes.clone();
-
-    let http_headers: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
-    let http_headers_read = http_headers.clone();
-    let http_headers_write = http_headers.clone();
-    let http_headers_chunk_idx = http_headers_body_chunk_idx.clone();
-
-    let http_status_code: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
-    let http_status_code_read = http_status_code.clone();
-    let http_status_code_notify = http_status_code.clone();
-
-    let http_entity_body: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
-    let http_entity_body_read = http_entity_body.clone();
-    let http_entity_body_write = http_entity_body.clone();
-    let http_entity_body_chunk_idx = http_headers_body_chunk_idx.clone();
-
-    let https_security: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
-    let https_security_read = https_security.clone();
-
-    let http_control_point_uri = http_uri.clone();
-    let http_control_point_headers = http_headers.clone();
-    let http_control_point_status_code = http_status_code.clone();
-    let http_control_point_entity_body = http_entity_body.clone();
-    let _http_control_point_security = https_security.clone();
-    let http_control_point_headers_body_sizes = http_headers_body_sizes.clone();
-    let http_control_point_headers_body_chunk_idx = http_headers_body_chunk_idx.clone();
-    
-    let app = Application {
-        services: vec![Service {
-            uuid: service_uuid,
-            primary: true,
-            characteristics: vec![
-                Characteristic {
-                    uuid: http_headers_body_sizes_uuid,
-                    read: Some(CharacteristicRead {
-                        read: true,
-                        fun: Box::new(move |req| {
-                            let value = http_headers_body_sizes_read.clone();
-                            async move {
-                                let value = value.lock().await.clone();
-                                debug!("Read request {:?} with value {:x?}", &req, &value);
-                                Ok(value)
-                            }
-                            .boxed()
-                        }),
-                        ..Default::default()
-                    }),
-                    ..Default::default()
-                },
-                Characteristic {
-                    uuid: http_headers_body_chunk_idx_uuid,
-                    read: Some(CharacteristicRead {
-                        read: true,
-                        fun: Box::new(move |req| {
-                            let value = http_headers_body_chunk_idx_read.clone();
-                            async move {
-                                let value = value.lock().await.clone();
-                                debug!("Read request {:?} with value {:x?}", &req, &value);
-                                Ok(value)
-                            }
-                            .boxed()
-                        }),
-                        ..Default::default()
-                    }),
-                    write: Some(CharacteristicWrite {
-                        write: true,
-                        write_without_response: true,
-                        method: CharacteristicWriteMethod::Fun(Box::new(move |new_value, req| {
-                            let value = http_headers_body_chunk_idx_write.clone();
-                            async move {
-                                debug!("Write request {:?} with value {:x?}", &req, &new_value);
-                                let mut value = value.lock().await;
-                                *value = new_value;
-                                Ok(())
-                            }
-                            .boxed()
-                        })),
-                        ..Default::default()
-                    }),
-                    ..Default::default()
-                },
-                Characteristic {
-                    uuid: http_uri_uuid,
-                    read: Some(CharacteristicRead {
-                        read: true,
-                        fun: Box::new(move |req| {
-                            let value = http_uri_read.clone();
-                            async move {
-                                let value = value.lock().await.clone();
-                                debug!("Read request {:?} with value {:x?}", &req, &value);
-                                Ok(value)
-                            }
-                            .boxed()
-                        }),
-                        ..Default::default()
-                    }),
-                    write: Some(CharacteristicWrite {
-                        write: true,
-                        write_without_response: true,
-                        method: CharacteristicWriteMethod::Fun(Box::new(move |new_value, req| {
-                            let value = http_uri_write.clone();
-                            async move {
-                                debug!("Write request {:?} with value {:x?}", &req, &new_value);
-                                let mut value = value.lock().await;
-                                *value = new_value;
-                                Ok(())
-                            }
-                            .boxed()
-                        })),
-                        ..Default::default()
-                    }),
-                    ..Default::default()
-                },
-                Characteristic {
-                    uuid: http_headers_uuid,
-                    read: Some(CharacteristicRead {
-                        read: true,
-                        fun: Box::new(move |req| {
-                            let value = http_headers_read.clone();
-                            let headers_idx = http_headers_chunk_idx.clone();
-                            let mtu = req.mtu as usize - 5;
-                            async move {
-                                let value = value.lock().await.clone();
-                                let headers_idx = headers_idx.lock().await.clone();
-                                let len = value.len() as usize;
-                                if len <= mtu {
-                                    return Ok(value)
-                                }
-                                let idx = if headers_idx.len() >= 4 {
-                                    u32::from_le_bytes(headers_idx[0..4].try_into().unwrap())
-                                } else { 
-                                    0
-                                } as usize;
-                                let start = if (idx * mtu) < len { idx * mtu } else { 0 };
-                                let end = if ((idx + 1) * mtu) < len { (idx + 1) * mtu } else { len };
-                                let truncated_value = value[start..end].to_vec();
-                                debug!("Read request {:?} with value {:x?}", &req, &truncated_value);
-                                Ok(truncated_value)
-                            }
-                            .boxed()
-                        }),
-                        ..Default::default()
-                    }),
-                    write: Some(CharacteristicWrite {
-                        write: true,
-                        write_without_response: true,
-                        method: CharacteristicWriteMethod::Fun(Box::new(move |new_value, req| {
-                            let value = http_headers_write.clone();
-                            async move {
-                                debug!("Write request {:?} with value {:x?}", &req, &new_value);
-                                let mut value = value.lock().await;
-                                *value = new_value;
-                                Ok(())
-                            }
-                            .boxed()
-                        })),
-                        ..Default::default()
-                    }),
-                    ..Default::default()
-                },
-                Characteristic {
-                    uuid: http_status_code_uuid,
-                    read: Some(CharacteristicRead {
-                        read: true,
-                        fun: Box::new(move |req| {
-                            let value = http_status_code_read.clone();
-                            async move {
-                                let value = value.lock().await.clone();
-                                debug!("Read request {:?} with value {:x?}", &req, &value);
-                                Ok(value)
-                            }
-                            .boxed()
-                        }),
-                        ..Default::default()
-                    }),
-                    notify: Some(CharacteristicNotify {
-                        notify: true,
-                        method: CharacteristicNotifyMethod::Fun(Box::new(move |mut notifier| {
-                            let value = http_status_code_notify.clone();
-                            async move {
-                                tokio::spawn(async move {
-                                    debug!(
-                                        "Notification session start with confirming={:?}",
-                                        notifier.confirming()
-                                    );
-                                    loop {
-                                        {
-                                            let value = value.lock().await;
-                                            debug!("Notifying with value {:x?}", &*value);
-                                            if let Err(err) = notifier.notify(value.to_vec()).await {
-                                                error!("Notification error: {}", &err);
-                                                break;
-                                            }
-                                        }
-                                        sleep(Duration::from_secs(5)).await;
-                                    }
-                                    debug!("Notification session stop");
-                                });
-                            }
-                            .boxed()
-                        })),
-                        ..Default::default()
-                    }),
-                    ..Default::default()
-                },
-                Characteristic {
-                    uuid: http_entity_body_uuid,
-                    read: Some(CharacteristicRead {
-                        read: true,
-                        fun: Box::new(move |req| {
-                            let value = http_entity_body_read.clone();
-                            let body_idx = http_entity_body_chunk_idx.clone();
-                            let mtu = req.mtu as usize - 5;
-                            async move {
-                                let value = value.lock().await.clone();
-                                let body_idx = body_idx.lock().await.clone();
-                                let len = value.len() as usize;
-                                if len <= mtu {
-                                    return Ok(value)
-                                }
-                                let idx = if body_idx.len() >= 8 {
-                                    u32::from_le_bytes(body_idx[4..8].try_into().unwrap()) 
-                                } else { 
-                                    0
-                                } as usize;
-                                let start = if (idx * mtu) < len { idx * mtu } else { 0 };
-                                let end = if ((idx + 1) * mtu) < len { (idx + 1) * mtu } else { len };
-                                let truncated_value = value[start..end].to_vec();
-                                debug!("Read request {:?} with value {:x?}", &req, &truncated_value);
-                                Ok(truncated_value)
-                            }
-                            .boxed()
-                        }),
-                        ..Default::default()
-                    }),
-                    write: Some(CharacteristicWrite {
-                        write: true,
-                        write_without_response: true,
-                        method: CharacteristicWriteMethod::Fun(Box::new(move |new_value, req| {
-                            let value = http_entity_body_write.clone();
-                            async move {
-                                debug!("Write request {:?} with value {:x?}", &req, &new_value);
-                                let mut value = value.lock().await;
-                                *value = new_value;
-                                Ok(())
-                            }
-                            .boxed()
-                        })),
-                        ..Default::default()
-                    }),
-                    ..Default::default()
-                },
-                Characteristic {
-                    uuid: https_security_uuid,
-                    read: Some(CharacteristicRead {
-                        read: true,
-                        fun: Box::new(move |req| {
-                            let value = https_security_read.clone();
-                            async move {
-                                let value = value.lock().await.clone();
-                                debug!("Read request {:?} with value {:x?}", &req, &value);
-                                Ok(value)
-                            }
-                            .boxed()
-                        }),
-                        ..Default::default()
-                    }),
-                    ..Default::default()
-                },
-                Characteristic {
-                    uuid: http_control_point_uuid,
-                    write: Some(CharacteristicWrite {
-                        write: true,
-                        write_without_response: true,
-                        method: CharacteristicWriteMethod::Fun(Box::new(move |new_value, req| {
-                            let byte_uri = http_control_point_uri.clone();
-                            let byte_headers = http_control_point_headers.clone();
-                            let byte_body = http_control_point_entity_body.clone();
-                            let byte_status = http_control_point_status_code.clone();
-                            let byte_headers_body_sizes = http_control_point_headers_body_sizes.clone();
-                            let byte_chunk_idx = http_control_point_headers_body_chunk_idx.clone();
-                            async move {
-                                // Method and protocol
-                                let method: Method;
-                                let protocol: &str;
-                                match new_value.first() {
-                                    Some(first) => {
-                                        match HttpControlOption::from_u8(*first) {
-                                            HttpControlOption::Get => { method = Method::GET; protocol = "http"; },
-                                            HttpControlOption::Head => { method = Method::HEAD; protocol = "http"; },
-                                            HttpControlOption::Post => { method = Method::POST; protocol = "http"; },
-                                            HttpControlOption::Put => { method = Method::PUT; protocol = "http"; },
-                                            HttpControlOption::Delete => { method = Method::DELETE; protocol = "http"; },
-                                            HttpControlOption::SecureGet => { method = Method::GET; protocol = "https"; },
-                                            HttpControlOption::SecureHead => { method = Method::HEAD; protocol = "https"; },
-                                            HttpControlOption::SecurePost => { method = Method::POST; protocol = "https"; },
-                                            HttpControlOption::SecurePut => { method = Method::PUT; protocol = "https"; },
-                                            HttpControlOption::SecureDelete => { method = Method::DELETE; protocol = "https"; },
-                                            _ => { 
-                                                error!("Invalid method");
-                                                return Ok(());
-                                            },
-                                        }
-                                    },
-                                    None => {
-                                        error!("No number has been provided");
-                                        return Ok(());
-                                    },
-                                }
-                                debug!("Method: '{}', Protocol: '{}'", method, protocol);
-
-                                // URL
-                                let address = match String::from_utf8(byte_uri.lock().await.to_vec()) {
-                                    Ok(string) => string,
-                                    Err(e) => {
-                                        error!("Unable to parse uri as string. Reason: {}", e);
-                                        String::new()
-                                    },
-                                };
-                                if address == "" {
-                                    return Ok(())
-                                }
-                                let url = format!("{}://{}", protocol, address);
-                                debug!("Sending request to '{}'", url);
-
-                                // Headers
-                                let headers: String;
-                                match String::from_utf8(byte_headers.lock().await.to_vec()) {
-                                    Ok(s) => headers = s,
-                                    Err(e) => {
-                                        error!("Unable to parse headers as string. Reason: {}", e);
-                                        return Ok(());
-                                    },
-                                };
-
-                                let client = reqwest::Client::new();
-                                let mut req_builder = client.request(method, url).timeout(Duration::new(args.timeout, 0));
-                                for h in headers.split("\r\n") {
-                                    let i = match h.find(":") {
-                                        Some(k) => k.try_into().unwrap(),
-                                        None => continue,
-                                    };
-                                    let header_key = h.substring(0, i).trim().to_string();
-                                    let header_value = h.substring(i+1, h.len()).trim().to_string();
-                                    debug!("Header: '{}: {}'", header_key, header_value);
-                                    req_builder = req_builder.header(header_key, header_value);
-                                }
-
-                                // Body
-                                let body: String;
-                                match String::from_utf8(byte_body.lock().await.to_vec()) {
-                                    Ok(s) => body = s,
-                                    Err(e) => {
-                                        error!("Unable to parse body as string. Reason: {}", e);
-                                        return Ok(());
-                                    },
-                                };
-                                debug!("Body: '{}'", body);
-                                if body != "" {
-                                    req_builder = req_builder.body(body);
-                                }
-
-                                // Response
-                                let res: Response;
-                                match req_builder.send().await {
-                                    Ok(r) => res = r,
-                                    Err(e) => {
-                                        error!("Unable to send the request. Reason: {}", e);
-                                        return Ok(());
-                                    }
-                                };
-                                debug!("Response: {:?}", &res);
-
-                                let mut status = Vec::new();
-                                status.write_u16::<LittleEndian>(res.status().into()).unwrap();
-
-                                // Write headers into buffer
-                                let mut headers_str = String::new();
-                                for (k, v) in res.headers() {
-                                    headers_str = format!("{}{}: {}\r\n", headers_str, k.as_str().to_owned(), String::from_utf8_lossy(v.as_bytes()).into_owned());
-                                }
-                                let mut header_values = byte_headers.lock().await;
-                                *header_values = headers_str.as_bytes().to_vec();
-                                let headers_status = if header_values.len() <= (req.mtu as usize - 5) { HttpDataStatusBit::HeadersReceived as u8 } else { HttpDataStatusBit::HeadersTruncated as u8 };
-
-                                // Write body into buffer
-                                let mut body_values = byte_body.lock().await;
-                                *body_values = match &res.bytes().await {
-                                    Ok(b) => b.to_vec(),
-                                    Err(e) => {
-                                        error!("Unable to parse response body. Reason: {}", e);
-                                        return Ok(());
-                                    } 
-                                };
-
-                                // Set headers and body sizes
-                                let mut headers_body_sizes = Vec::new();
-                                headers_body_sizes.write_u32::<LittleEndian>(header_values.len().try_into().unwrap()).unwrap();
-                                headers_body_sizes.write_u32::<LittleEndian>(body_values.len().try_into().unwrap()).unwrap();
-                                let mut byte_headers_body_sizes_values = byte_headers_body_sizes.lock().await;
-                                *byte_headers_body_sizes_values = headers_body_sizes;
-
-                                // Set chunk indexes to 0
-                                let mut chunk_idxs_values = Vec::new();
-                                chunk_idxs_values.write_u32::<LittleEndian>(0).unwrap();
-                                chunk_idxs_values.write_u32::<LittleEndian>(0).unwrap();
-                                let mut chunk_idxs = byte_chunk_idx.lock().await;
-                                *chunk_idxs = chunk_idxs_values;
-
-                                let body_status = if body_values.len() <= (req.mtu as usize - 5) { HttpDataStatusBit::BodyReceived as u8 } else { HttpDataStatusBit::BodyTruncated as u8 };
-                                status.write_u8(headers_status | body_status).unwrap();
-                                
-                                // Write HTTP response code
-                                let mut status_values = byte_status.lock().await;
-                                *status_values = status;
-
-                                debug!("Write request {:?} with value {:x?}", &req, &new_value);
-
-                                Ok(())
-                            }.boxed()
-                        })),
-                        ..Default::default()
-                    }),
-                    ..Default::default()
-                },
-            ],
-            ..Default::default()
-        }],
-        ..Default::default()
-    };
+    let app = create_application(&state, args.timeout);
     let app_handle = adapter.serve_gatt_application(app).await?;
 
     info!("Service ready.");
 
-    // Graceful shutdown when sigint or sigterm are received
+    handle_signals().await?;
+
+    info!("Removing service and advertisement");
+    drop(app_handle);
+    drop(adv_handle);
+    sleep(Duration::from_secs(1)).await;
+
+    Ok(())
+}
+
+fn create_application(state: &Arc<AppState>, timeout: u64) -> Application {
+    Application {
+        services: vec![Service {
+            uuid: *SERVICE_UUID,
+            primary: true,
+            characteristics: vec![
+                create_http_headers_body_sizes_characteristic(state),
+                create_http_headers_body_chunk_idx_characteristic(state),
+                create_http_uri_characteristic(state),
+                create_http_headers_characteristic(state),
+                create_http_status_code_characteristic(state),
+                create_http_entity_body_characteristic(state),
+                create_https_security_characteristic(state),
+                create_http_control_point_characteristic(state, timeout),
+            ],
+            ..Default::default()
+        }],
+        ..Default::default()
+    }
+}
+
+// Helper functions to create characteristics
+fn create_http_headers_body_sizes_characteristic(state: &Arc<AppState>) -> Characteristic {
+    let state = state.clone();
+    Characteristic {
+        uuid: *HTTP_HEADERS_BODY_SIZES_UUID,
+        read: Some(CharacteristicRead {
+            read: true,
+            fun: Box::new(move |req| {
+                let value = state.http_headers_body_sizes.clone();
+                async move {
+                    let value = value.lock().await.clone();
+                    debug!("Read request {:?} with value {:x?}", &req, &value);
+                    Ok(value)
+                }
+                .boxed()
+            }),
+            ..Default::default()
+        }),
+        ..Default::default()
+    }
+}
+
+fn create_http_headers_body_chunk_idx_characteristic(state: &Arc<AppState>) -> Characteristic {
+    let state_r = state.clone();
+    let state_w = state.clone();
+    Characteristic {
+        uuid: *HTTP_HEADERS_BODY_CHUNK_IDX_UUID,
+        read: Some(CharacteristicRead {
+            read: true,
+            fun: Box::new(move |req| {
+                let value = state_r.http_headers_body_chunk_idx.clone();
+                async move {
+                    let value = value.lock().await.clone();
+                    debug!("Read request {:?} with value {:x?}", &req, &value);
+                    Ok(value)
+                }
+                .boxed()
+            }),
+            ..Default::default()
+        }),
+        write: Some(CharacteristicWrite {
+            write: true,
+            write_without_response: true,
+            method: CharacteristicWriteMethod::Fun(Box::new(move |new_value, req| {
+                let value = state_w.http_headers_body_chunk_idx.clone();
+                async move {
+                    debug!("Write request {:?} with value {:x?}", &req, &new_value);
+                    let mut value = value.lock().await;
+                    *value = new_value;
+                    Ok(())
+                }
+                .boxed()
+            })),
+            ..Default::default()
+        }),
+        ..Default::default()
+    }
+}
+
+fn create_http_uri_characteristic(state: &Arc<AppState>) -> Characteristic {
+    let state_r = state.clone();
+    let state_w = state.clone();
+    Characteristic {
+        uuid: *HTTP_URI_UUID,
+        read: Some(CharacteristicRead {
+            read: true,
+            fun: Box::new(move |req| {
+                let value = state_r.http_uri.clone();
+                async move {
+                    let value = value.lock().await.clone();
+                    debug!("Read request {:?} with value {:x?}", &req, &value);
+                    Ok(value)
+                }
+                .boxed()
+            }),
+            ..Default::default()
+        }),
+        write: Some(CharacteristicWrite {
+            write: true,
+            write_without_response: true,
+            method: CharacteristicWriteMethod::Fun(Box::new(move |new_value, req| {
+                let value = state_w.http_uri.clone();
+                async move {
+                    debug!("Write request {:?} with value {:x?}", &req, &new_value);
+                    let mut value = value.lock().await;
+                    *value = new_value;
+                    Ok(())
+                }
+                .boxed()
+            })),
+            ..Default::default()
+        }),
+        ..Default::default()
+    }
+}
+
+fn create_http_headers_characteristic(state: &Arc<AppState>) -> Characteristic {
+    let state_r = state.clone();
+    let state_w = state.clone();
+    Characteristic {
+        uuid: *HTTP_HEADERS_UUID,
+        read: Some(CharacteristicRead {
+            read: true,
+            fun: Box::new(move |req| {
+                let value = state_r.http_headers.clone();
+                let headers_idx = state_r.http_headers_body_chunk_idx.clone();
+                let mtu = req.mtu as usize - MTU_OVERHEAD;
+                async move {
+                    let value = value.lock().await.clone();
+                    let headers_idx = headers_idx.lock().await.clone();
+                    let len = value.len();
+                    if len <= mtu {
+                        return Ok(value);
+                    }
+                    let idx = if headers_idx.len() >= 4 {
+                        u32::from_le_bytes(headers_idx[0..4].try_into().unwrap())
+                    } else {
+                        0
+                    } as usize;
+                    let start = if (idx * mtu) < len { idx * mtu } else { 0 };
+                    let end = if ((idx + 1) * mtu) < len { (idx + 1) * mtu } else { len };
+                    let truncated_value = value[start..end].to_vec();
+                    debug!("Read request {:?} with value {:x?}", &req, &truncated_value);
+                    Ok(truncated_value)
+                }
+                .boxed()
+            }),
+            ..Default::default()
+        }),
+        write: Some(CharacteristicWrite {
+            write: true,
+            write_without_response: true,
+            method: CharacteristicWriteMethod::Fun(Box::new(move |new_value, req| {
+                let value = state_w.http_headers.clone();
+                async move {
+                    debug!("Write request {:?} with value {:x?}", &req, &new_value);
+                    let mut value = value.lock().await;
+                    *value = new_value;
+                    Ok(())
+                }
+                .boxed()
+            })),
+            ..Default::default()
+        }),
+        ..Default::default()
+    }
+}
+
+fn create_http_status_code_characteristic(state: &Arc<AppState>) -> Characteristic {
+    let state_r = state.clone();
+    let state_w = state.clone();
+    Characteristic {
+        uuid: *HTTP_STATUS_CODE_UUID,
+        read: Some(CharacteristicRead {
+            read: true,
+            fun: Box::new(move |req| {
+                let value = state_r.http_status_code.clone();
+                async move {
+                    let value = value.lock().await.clone();
+                    debug!("Read request {:?} with value {:x?}", &req, &value);
+                    Ok(value)
+                }
+                .boxed()
+            }),
+            ..Default::default()
+        }),
+        notify: Some(CharacteristicNotify {
+            notify: true,
+            method: CharacteristicNotifyMethod::Fun(Box::new(move |mut notifier| {
+                let value = state_w.http_status_code.clone();
+                async move {
+                    tokio::spawn(async move {
+                        debug!(
+                            "Notification session start with confirming={:?}",
+                            notifier.confirming()
+                        );
+                        loop {
+                            {
+                                let value = value.lock().await;
+                                debug!("Notifying with value {:x?}", &*value);
+                                if let Err(err) = notifier.notify(value.to_vec()).await {
+                                    error!("Notification error: {}", &err);
+                                    break;
+                                }
+                            }
+                            sleep(Duration::from_secs(5)).await;
+                        }
+                        debug!("Notification session stop");
+                    });
+                }
+                .boxed()
+            })),
+            ..Default::default()
+        }),
+        ..Default::default()
+    }
+}
+
+fn create_http_entity_body_characteristic(state: &Arc<AppState>) -> Characteristic {
+    let state_r = state.clone();
+    let state_w = state.clone();
+    Characteristic {
+        uuid: *HTTP_ENTITY_BODY_UUID,
+        read: Some(CharacteristicRead {
+            read: true,
+            fun: Box::new(move |req| {
+                let value = state_r.http_entity_body.clone();
+                let body_idx = state_r.http_headers_body_chunk_idx.clone();
+                let mtu = req.mtu as usize - MTU_OVERHEAD;
+                async move {
+                    let value = value.lock().await.clone();
+                    let body_idx = body_idx.lock().await.clone();
+                    let len = value.len();
+                    if len <= mtu {
+                        return Ok(value);
+                    }
+                    let idx = if body_idx.len() >= 8 {
+                        u32::from_le_bytes(body_idx[4..8].try_into().unwrap())
+                    } else {
+                        0
+                    } as usize;
+                    let start = if (idx * mtu) < len { idx * mtu } else { 0 };
+                    let end = if ((idx + 1) * mtu) < len { (idx + 1) * mtu } else { len };
+                    let truncated_value = value[start..end].to_vec();
+                    debug!("Read request {:?} with value {:x?}", &req, &truncated_value);
+                    Ok(truncated_value)
+                }
+                .boxed()
+            }),
+            ..Default::default()
+        }),
+        write: Some(CharacteristicWrite {
+            write: true,
+            write_without_response: true,
+            method: CharacteristicWriteMethod::Fun(Box::new(move |new_value, req| {
+                let value = state_w.http_entity_body.clone();
+                async move {
+                    debug!("Write request {:?} with value {:x?}", &req, &new_value);
+                    let mut value = value.lock().await;
+                    *value = new_value;
+                    Ok(())
+                }
+                .boxed()
+            })),
+            ..Default::default()
+        }),
+        ..Default::default()
+    }
+}
+
+fn create_https_security_characteristic(state: &Arc<AppState>) -> Characteristic {
+    let state_r = state.clone();
+    Characteristic {
+        uuid: *HTTPS_SECURITY_UUID,
+        read: Some(CharacteristicRead {
+            read: true,
+            fun: Box::new(move |req| {
+                let value = state_r.https_security.clone();
+                async move {
+                    let value = value.lock().await.clone();
+                    debug!("Read request {:?} with value {:x?}", &req, &value);
+                    Ok(value)
+                }
+                .boxed()
+            }),
+            ..Default::default()
+        }),
+        ..Default::default()
+    }
+}
+
+fn create_http_control_point_characteristic(state: &Arc<AppState>, timeout: u64) -> Characteristic {
+    let state_r = state.clone();
+    Characteristic {
+        uuid: *HTTP_CONTROL_POINT_UUID,
+        write: Some(CharacteristicWrite {
+            write: true,
+            write_without_response: true,
+            method: CharacteristicWriteMethod::Fun(Box::new(move |new_value, req| {
+                let state = state_r.clone();
+                async move {
+                    let _ = handle_http_control_point(&state, new_value, req, timeout).await;
+                    Ok(())
+                }
+                .boxed()
+            })),
+            ..Default::default()
+        }),
+        ..Default::default()
+    }
+}
+
+async fn handle_http_control_point(
+    state: &Arc<AppState>,
+    new_value: Vec<u8>,
+    req: bluer::gatt::local::CharacteristicWriteRequest,
+    timeout: u64,
+) -> Result<(), AppError> {
+    // Method and protocol
+    let (method, protocol) = match new_value.first() {
+        Some(&first) => match HttpControlOption::from_u8(first) {
+            Some(HttpControlOption::Get) => (Method::GET, "http"),
+            Some(HttpControlOption::Head) => (Method::HEAD, "http"),
+            Some(HttpControlOption::Post) => (Method::POST, "http"),
+            Some(HttpControlOption::Put) => (Method::PUT, "http"),
+            Some(HttpControlOption::Delete) => (Method::DELETE, "http"),
+            Some(HttpControlOption::SecureGet) => (Method::GET, "https"),
+            Some(HttpControlOption::SecureHead) => (Method::HEAD, "https"),
+            Some(HttpControlOption::SecurePost) => (Method::POST, "https"),
+            Some(HttpControlOption::SecurePut) => (Method::PUT, "https"),
+            Some(HttpControlOption::SecureDelete) => (Method::DELETE, "https"),
+            Some(HttpControlOption::Cancel) => {
+                debug!("Request cancelled");
+                return Ok(());
+            }
+            _ => {
+                error!("Invalid method");
+                return Ok(());
+            }
+        },
+        None => {
+            error!("No method provided");
+            return Ok(());
+        }
+    };
+
+    debug!("Method: '{}', Protocol: '{}'", method, protocol);
+
+    // URL
+    let address = String::from_utf8(state.http_uri.lock().await.clone())?;
+    if address.is_empty() {
+        error!("No URL provided");
+        return Ok(());
+    }
+    let url = format!("{}://{}", protocol, address);
+    debug!("Sending request to '{}'", url);
+
+    // Headers
+    let headers_str = String::from_utf8(state.http_headers.lock().await.clone())?;
+    let client = reqwest::Client::new();
+    let mut req_builder = client
+        .request(method, url)
+        .timeout(Duration::from_secs(timeout));
+
+    for h in headers_str.split("\r\n") {
+        if let Some(i) = h.find(':') {
+            let (header_key, header_value) = h.split_at(i);
+            let header_key = header_key.trim();
+            let header_value = header_value[1..].trim(); // Skip the ':' and trim
+            debug!("Header: '{}: {}'", header_key, header_value);
+            req_builder = req_builder.header(header_key, header_value);
+        }
+    }
+
+    // Body
+    let body = String::from_utf8(state.http_entity_body.lock().await.clone())?;
+    debug!("Body: '{}'", body);
+    if !body.is_empty() {
+        req_builder = req_builder.body(body);
+    }
+
+    // Send request and handle response
+    let res = req_builder.send().await?;
+    debug!("Response: {:?}", &res);
+
+    let mut status = Vec::new();
+    status.write_u16::<LittleEndian>(res.status().as_u16())?;
+
+    // Write headers into buffer
+    let headers_str = res
+        .headers()
+        .iter()
+        .map(|(k, v)| format!("{}: {}\r\n", k.as_str(), v.to_str().unwrap_or("")))
+        .collect::<String>();
+
+    let mut header_values = state.http_headers.lock().await;
+    *header_values = headers_str.into_bytes();
+
+    let headers_status = if header_values.len() <= (req.mtu as usize - MTU_OVERHEAD) {
+        HttpDataStatusBit::HeadersReceived as u8
+    } else {
+        HttpDataStatusBit::HeadersTruncated as u8
+    };
+
+    // Write body into buffer
+    let body_bytes = res.bytes().await?;
+    let mut body_values = state.http_entity_body.lock().await;
+    *body_values = body_bytes.to_vec();
+
+    // Set headers and body sizes
+    let mut headers_body_sizes = Vec::new();
+    headers_body_sizes.write_u32::<LittleEndian>(header_values.len() as u32)?;
+    headers_body_sizes.write_u32::<LittleEndian>(body_values.len() as u32)?;
+    let mut byte_headers_body_sizes_values = state.http_headers_body_sizes.lock().await;
+    *byte_headers_body_sizes_values = headers_body_sizes;
+
+    // Set chunk indexes to 0
+    let chunk_idxs_values = vec![0; 8];
+    let mut chunk_idxs = state.http_headers_body_chunk_idx.lock().await;
+    *chunk_idxs = chunk_idxs_values;
+
+    let body_status = if body_values.len() <= (req.mtu as usize - MTU_OVERHEAD) {
+        HttpDataStatusBit::BodyReceived as u8
+    } else {
+        HttpDataStatusBit::BodyTruncated as u8
+    };
+    status.push(headers_status | body_status);
+
+    // Write HTTP response code
+    let mut status_values = state.http_status_code.lock().await;
+    *status_values = status;
+
+    debug!("Write request {:?} completed", &req);
+
+    Ok(())
+}
+
+async fn handle_signals() -> Result<(), AppError> {
     let mut signal_terminate = signal(SignalKind::terminate())?;
     let mut signal_interrupt = signal(SignalKind::interrupt())?;
     tokio::select! {
         _ = signal_terminate.recv() => info!("Received SIGTERM"),
         _ = signal_interrupt.recv() => info!("Received SIGINT"),
     };
-
-    info!("Removing service and advertisement");
-    drop(app_handle);
-    drop(adv_handle);
-    sleep(Duration::from_secs(1)).await;
-    
     Ok(())
 }
