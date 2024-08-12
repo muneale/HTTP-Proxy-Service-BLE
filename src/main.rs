@@ -22,7 +22,7 @@ use tokio::{
     sync::Mutex,
     time::sleep,
 };
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 // Constants
 const MTU_OVERHEAD: usize = 3;
@@ -64,13 +64,15 @@ enum HttpDataStatusBit {
     BodyTruncated = 8,
 }
 
-#[derive(Parser)]
+#[derive(Debug, Parser)]
 #[command(author, version, about, long_about = None)]
 struct Args {
     #[arg(short, long, default_value = "Logbot-HPS", help = "Service name")]
     name: String,
     #[arg(short, long, default_value = "60", help = "HTTP requests timeout in seconds")]
     timeout: u64,
+    #[arg(short, long, default_value = "0", help = "Overrides the MTU size in bytes. When set to 0, it uses the established MTU size between client and server. Ignored when the value is greater than established MTU size.")]
+    mtu: usize,
 }
 
 #[derive(Error, Debug)]
@@ -115,11 +117,14 @@ async fn main() -> Result<(), AppError> {
 
     let args = Args::parse();
 
+    info!(target="main", "Service started with arguments: {:?}", args);
+
     let session = bluer::Session::new().await?;
     let adapter = session.default_adapter().await?;
     adapter.set_powered(true).await?;
 
     info!(
+        target="main",
         "Advertising on Bluetooth adapter {} with address {}",
         adapter.name(),
         adapter.address().await?
@@ -134,20 +139,21 @@ async fn main() -> Result<(), AppError> {
     let adv_handle = adapter.advertise(le_advertisement).await?;
 
     info!(
+        target="main",
         "Serving GATT echo service on Bluetooth adapter {}",
         adapter.name()
     );
 
     let state = Arc::new(AppState::new());
 
-    let app = create_application(&state, args.timeout);
+    let app = create_application(&state, args.timeout, args.mtu);
     let app_handle = adapter.serve_gatt_application(app).await?;
 
-    info!("Service ready.");
+    info!(target="main", "Service ready.");
 
     handle_signals().await?;
 
-    info!("Removing service and advertisement");
+    info!(target="main", "Removing service and advertisement");
     drop(app_handle);
     drop(adv_handle);
     sleep(Duration::from_secs(1)).await;
@@ -155,20 +161,20 @@ async fn main() -> Result<(), AppError> {
     Ok(())
 }
 
-fn create_application(state: &Arc<AppState>, timeout: u64) -> Application {
+fn create_application(state: &Arc<AppState>, timeout: u64, mtu: usize) -> Application {
     Application {
         services: vec![Service {
             uuid: *SERVICE_UUID,
             primary: true,
             characteristics: vec![
-                create_http_headers_body_sizes_characteristic(state),
+                create_http_headers_body_mtu_sizes_characteristic(state),
                 create_http_headers_body_chunk_idx_characteristic(state),
                 create_http_uri_characteristic(state),
-                create_http_headers_characteristic(state),
+                create_http_headers_characteristic(state, mtu),
                 create_http_status_code_characteristic(state),
-                create_http_entity_body_characteristic(state),
+                create_http_entity_body_characteristic(state, mtu),
                 create_https_security_characteristic(state),
-                create_http_control_point_characteristic(state, timeout),
+                create_http_control_point_characteristic(state, timeout, mtu),
             ],
             ..Default::default()
         }],
@@ -177,7 +183,7 @@ fn create_application(state: &Arc<AppState>, timeout: u64) -> Application {
 }
 
 // Helper functions to create characteristics
-fn create_http_headers_body_sizes_characteristic(state: &Arc<AppState>) -> Characteristic {
+fn create_http_headers_body_mtu_sizes_characteristic(state: &Arc<AppState>) -> Characteristic {
     let state = state.clone();
     Characteristic {
         uuid: *HTTP_HEADERS_BODY_SIZES_UUID,
@@ -187,7 +193,7 @@ fn create_http_headers_body_sizes_characteristic(state: &Arc<AppState>) -> Chara
                 let value = state.http_headers_body_sizes.clone();
                 async move {
                     let value = value.lock().await.clone();
-                    debug!("Read request {:?} with value {:x?}", &req, &value);
+                    debug!(target="create_http_headers_body_mtu_sizes_characteristic", "Read request {:?} with value {:x?}", &req, &value);
                     Ok(value)
                 }
                 .boxed()
@@ -209,7 +215,7 @@ fn create_http_headers_body_chunk_idx_characteristic(state: &Arc<AppState>) -> C
                 let value = state_r.http_headers_body_chunk_idx.clone();
                 async move {
                     let value = value.lock().await.clone();
-                    debug!("Read request {:?} with value {:x?}", &req, &value);
+                    debug!(target="create_http_headers_body_chunk_idx_characteristic", "Read request {:?} with value {:x?}", &req, &value);
                     Ok(value)
                 }
                 .boxed()
@@ -222,7 +228,7 @@ fn create_http_headers_body_chunk_idx_characteristic(state: &Arc<AppState>) -> C
             method: CharacteristicWriteMethod::Fun(Box::new(move |new_value, req| {
                 let value = state_w.http_headers_body_chunk_idx.clone();
                 async move {
-                    debug!("Write request {:?} with value {:x?}", &req, &new_value);
+                    debug!(target="create_http_headers_body_chunk_idx_characteristic", "Write request {:?} with value {:x?}", &req, &new_value);
                     let mut value = value.lock().await;
                     *value = new_value;
                     Ok(())
@@ -246,7 +252,7 @@ fn create_http_uri_characteristic(state: &Arc<AppState>) -> Characteristic {
                 let value = state_r.http_uri.clone();
                 async move {
                     let value = value.lock().await.clone();
-                    debug!("Read request {:?} with value {:x?}", &req, &value);
+                    debug!(target="create_http_uri_characteristic", "Read request {:?} with value {:x?}", &req, &value);
                     Ok(value)
                 }
                 .boxed()
@@ -259,7 +265,7 @@ fn create_http_uri_characteristic(state: &Arc<AppState>) -> Characteristic {
             method: CharacteristicWriteMethod::Fun(Box::new(move |new_value, req| {
                 let value = state_w.http_uri.clone();
                 async move {
-                    debug!("Write request {:?} with value {:x?}", &req, &new_value);
+                    debug!(target="create_http_uri_characteristic", "Write request {:?} with value {:x?}", &req, &new_value);
                     let mut value = value.lock().await;
                     *value = new_value;
                     Ok(())
@@ -272,7 +278,7 @@ fn create_http_uri_characteristic(state: &Arc<AppState>) -> Characteristic {
     }
 }
 
-fn create_http_headers_characteristic(state: &Arc<AppState>) -> Characteristic {
+fn create_http_headers_characteristic(state: &Arc<AppState>, mtu: usize) -> Characteristic {
     let state_r = state.clone();
     let state_w = state.clone();
     Characteristic {
@@ -282,7 +288,7 @@ fn create_http_headers_characteristic(state: &Arc<AppState>) -> Characteristic {
             fun: Box::new(move |req| {
                 let value = state_r.http_headers.clone();
                 let headers_idx = state_r.http_headers_body_chunk_idx.clone();
-                let mtu = req.mtu as usize - MTU_OVERHEAD;
+                let mtu = if mtu > 0 && mtu < req.mtu as usize { mtu } else { req.mtu as usize - MTU_OVERHEAD };
                 async move {
                     let value = value.lock().await.clone();
                     let headers_idx = headers_idx.lock().await.clone();
@@ -295,10 +301,10 @@ fn create_http_headers_characteristic(state: &Arc<AppState>) -> Characteristic {
                     } else {
                         0
                     } as usize;
-                    let start = if (idx * mtu) < len { idx * mtu } else { 0 };
+                    let start = if (idx * mtu) < len { idx * mtu } else { len - (idx - 1) * mtu };
                     let end = if ((idx + 1) * mtu) < len { (idx + 1) * mtu } else { len };
                     let truncated_value = value[start..end].to_vec();
-                    debug!("Read request {:?} with value {:x?}", &req, &truncated_value);
+                    debug!(target="create_http_headers_characteristic", "Read request {:?} with value {:x?}", &req, &truncated_value);
                     Ok(truncated_value)
                 }
                 .boxed()
@@ -311,7 +317,7 @@ fn create_http_headers_characteristic(state: &Arc<AppState>) -> Characteristic {
             method: CharacteristicWriteMethod::Fun(Box::new(move |new_value, req| {
                 let value = state_w.http_headers.clone();
                 async move {
-                    debug!("Write request {:?} with value {:x?}", &req, &new_value);
+                    debug!(target="create_http_headers_characteristic", "Write request {:?} with value {:x?}", &req, &new_value);
                     let mut value = value.lock().await;
                     *value = new_value;
                     Ok(())
@@ -335,7 +341,7 @@ fn create_http_status_code_characteristic(state: &Arc<AppState>) -> Characterist
                 let value = state_r.http_status_code.clone();
                 async move {
                     let value = value.lock().await.clone();
-                    debug!("Read request {:?} with value {:x?}", &req, &value);
+                    debug!(target="create_http_status_code_characteristic", "Read request {:?} with value {:x?}", &req, &value);
                     Ok(value)
                 }
                 .boxed()
@@ -349,21 +355,22 @@ fn create_http_status_code_characteristic(state: &Arc<AppState>) -> Characterist
                 async move {
                     tokio::spawn(async move {
                         debug!(
+                            target="create_http_status_code_characteristic",
                             "Notification session start with confirming={:?}",
                             notifier.confirming()
                         );
                         loop {
                             {
                                 let value = value.lock().await;
-                                debug!("Notifying with value {:x?}", &*value);
+                                debug!(target="create_http_status_code_characteristic", "Notifying with value {:x?}", &*value);
                                 if let Err(err) = notifier.notify(value.to_vec()).await {
-                                    error!("Notification error: {}", &err);
+                                    warn!("Notification error: {}", &err);
                                     break;
                                 }
                             }
                             sleep(Duration::from_secs(5)).await;
                         }
-                        debug!("Notification session stop");
+                        debug!(target="create_http_status_code_characteristic", "Notification session stop");
                     });
                 }
                 .boxed()
@@ -374,7 +381,7 @@ fn create_http_status_code_characteristic(state: &Arc<AppState>) -> Characterist
     }
 }
 
-fn create_http_entity_body_characteristic(state: &Arc<AppState>) -> Characteristic {
+fn create_http_entity_body_characteristic(state: &Arc<AppState>, mtu: usize) -> Characteristic {
     let state_r = state.clone();
     let state_w = state.clone();
     Characteristic {
@@ -384,7 +391,7 @@ fn create_http_entity_body_characteristic(state: &Arc<AppState>) -> Characterist
             fun: Box::new(move |req| {
                 let value = state_r.http_entity_body.clone();
                 let body_idx = state_r.http_headers_body_chunk_idx.clone();
-                let mtu = req.mtu as usize - MTU_OVERHEAD;
+                let mtu = if mtu > 0 && mtu < req.mtu as usize { mtu } else { req.mtu as usize - MTU_OVERHEAD };
                 async move {
                     let value = value.lock().await.clone();
                     let body_idx = body_idx.lock().await.clone();
@@ -397,10 +404,10 @@ fn create_http_entity_body_characteristic(state: &Arc<AppState>) -> Characterist
                     } else {
                         0
                     } as usize;
-                    let start = if (idx * mtu) < len { idx * mtu } else { 0 };
+                    let start = if (idx * mtu) < len { idx * mtu } else { len - (idx - 1) * mtu };
                     let end = if ((idx + 1) * mtu) < len { (idx + 1) * mtu } else { len };
                     let truncated_value = value[start..end].to_vec();
-                    debug!("Read request {:?} with value {:x?}", &req, &truncated_value);
+                    debug!(target="create_http_entity_body_characteristic", "Read request {:?} with value {:x?}", &req, &truncated_value);
                     Ok(truncated_value)
                 }
                 .boxed()
@@ -413,7 +420,7 @@ fn create_http_entity_body_characteristic(state: &Arc<AppState>) -> Characterist
             method: CharacteristicWriteMethod::Fun(Box::new(move |new_value, req| {
                 let value = state_w.http_entity_body.clone();
                 async move {
-                    debug!("Write request {:?} with value {:x?}", &req, &new_value);
+                    debug!(target="create_http_entity_body_characteristic", "Write request {:?} with value {:x?}", &req, &new_value);
                     let mut value = value.lock().await;
                     *value = new_value;
                     Ok(())
@@ -436,7 +443,7 @@ fn create_https_security_characteristic(state: &Arc<AppState>) -> Characteristic
                 let value = state_r.https_security.clone();
                 async move {
                     let value = value.lock().await.clone();
-                    debug!("Read request {:?} with value {:x?}", &req, &value);
+                    debug!(target="create_https_security_characteristic", "Read request {:?} with value {:x?}", &req, &value);
                     Ok(value)
                 }
                 .boxed()
@@ -447,7 +454,7 @@ fn create_https_security_characteristic(state: &Arc<AppState>) -> Characteristic
     }
 }
 
-fn create_http_control_point_characteristic(state: &Arc<AppState>, timeout: u64) -> Characteristic {
+fn create_http_control_point_characteristic(state: &Arc<AppState>, timeout: u64, mtu: usize) -> Characteristic {
     let state_r = state.clone();
     Characteristic {
         uuid: *HTTP_CONTROL_POINT_UUID,
@@ -457,7 +464,7 @@ fn create_http_control_point_characteristic(state: &Arc<AppState>, timeout: u64)
             method: CharacteristicWriteMethod::Fun(Box::new(move |new_value, req| {
                 let state = state_r.clone();
                 async move {
-                    let _ = handle_http_control_point(&state, new_value, req, timeout).await;
+                    let _ = handle_http_control_point(&state, new_value, req, timeout, mtu).await;
                     Ok(())
                 }
                 .boxed()
@@ -473,6 +480,7 @@ async fn handle_http_control_point(
     new_value: Vec<u8>,
     req: bluer::gatt::local::CharacteristicWriteRequest,
     timeout: u64,
+    mtu: usize
 ) -> Result<(), AppError> {
     // Method and protocol
     let (method, protocol) = match new_value.first() {
@@ -488,30 +496,30 @@ async fn handle_http_control_point(
             Some(HttpControlOption::SecurePut) => (Method::PUT, "https"),
             Some(HttpControlOption::SecureDelete) => (Method::DELETE, "https"),
             Some(HttpControlOption::Cancel) => {
-                debug!("Request cancelled");
+                debug!(target="handle_http_control_point", "Request cancelled");
                 return Ok(());
             }
             _ => {
-                error!("Invalid method");
+                error!(target="handle_http_control_point", "Invalid method");
                 return Ok(());
             }
         },
         None => {
-            error!("No method provided");
+            error!(target="handle_http_control_point", "No method provided");
             return Ok(());
         }
     };
 
-    debug!("Method: '{}', Protocol: '{}'", method, protocol);
+    debug!(target="handle_http_control_point", "Method: '{}', Protocol: '{}'", method, protocol);
 
     // URL
     let address = String::from_utf8(state.http_uri.lock().await.clone())?;
     if address.is_empty() {
-        error!("No URL provided");
+        error!(target="handle_http_control_point", "No URL provided");
         return Ok(());
     }
     let url = format!("{}://{}", protocol, address);
-    debug!("Sending request to '{}'", url);
+    debug!(target="handle_http_control_point", "Sending request to '{}'", url);
 
     // Headers
     let headers_str = String::from_utf8(state.http_headers.lock().await.clone())?;
@@ -525,21 +533,21 @@ async fn handle_http_control_point(
             let (header_key, header_value) = h.split_at(i);
             let header_key = header_key.trim();
             let header_value = header_value[1..].trim(); // Skip the ':' and trim
-            debug!("Header: '{}: {}'", header_key, header_value);
+            debug!(target="handle_http_control_point", "Header: '{}: {}'", header_key, header_value);
             req_builder = req_builder.header(header_key, header_value);
         }
     }
 
     // Body
     let body = String::from_utf8(state.http_entity_body.lock().await.clone())?;
-    debug!("Body: '{}'", body);
+    debug!(target="handle_http_control_point", "Body: '{}'", body);
     if !body.is_empty() {
         req_builder = req_builder.body(body);
     }
 
     // Send request and handle response
     let res = req_builder.send().await?;
-    debug!("Response: {:?}", &res);
+    debug!(target="handle_http_control_point", "Response: {:?}", &res);
 
     let mut status = Vec::new();
     status.write_u16::<LittleEndian>(res.status().as_u16())?;
@@ -554,7 +562,8 @@ async fn handle_http_control_point(
     let mut header_values = state.http_headers.lock().await;
     *header_values = headers_str.into_bytes();
 
-    let headers_status = if header_values.len() <= (req.mtu as usize - MTU_OVERHEAD) {
+    let mtu = if mtu > 0 && mtu < req.mtu as usize { mtu } else { req.mtu as usize - MTU_OVERHEAD };
+    let headers_status = if header_values.len() <= mtu {
         HttpDataStatusBit::HeadersReceived as u8
     } else {
         HttpDataStatusBit::HeadersTruncated as u8
@@ -565,10 +574,12 @@ async fn handle_http_control_point(
     let mut body_values = state.http_entity_body.lock().await;
     *body_values = body_bytes.to_vec();
 
-    // Set headers and body sizes
+    // Set headers, body and MTU sizes
     let mut headers_body_sizes = Vec::new();
+    
     headers_body_sizes.write_u32::<LittleEndian>(header_values.len() as u32)?;
     headers_body_sizes.write_u32::<LittleEndian>(body_values.len() as u32)?;
+    headers_body_sizes.write_u32::<LittleEndian>(mtu as u32)?;
     let mut byte_headers_body_sizes_values = state.http_headers_body_sizes.lock().await;
     *byte_headers_body_sizes_values = headers_body_sizes;
 
@@ -577,7 +588,7 @@ async fn handle_http_control_point(
     let mut chunk_idxs = state.http_headers_body_chunk_idx.lock().await;
     *chunk_idxs = chunk_idxs_values;
 
-    let body_status = if body_values.len() <= (req.mtu as usize - MTU_OVERHEAD) {
+    let body_status = if body_values.len() <= mtu {
         HttpDataStatusBit::BodyReceived as u8
     } else {
         HttpDataStatusBit::BodyTruncated as u8
@@ -588,7 +599,7 @@ async fn handle_http_control_point(
     let mut status_values = state.http_status_code.lock().await;
     *status_values = status;
 
-    debug!("Write request {:?} completed", &req);
+    debug!(target="handle_http_control_point", "Write request {:?} completed", &req);
 
     Ok(())
 }
@@ -597,8 +608,8 @@ async fn handle_signals() -> Result<(), AppError> {
     let mut signal_terminate = signal(SignalKind::terminate())?;
     let mut signal_interrupt = signal(SignalKind::interrupt())?;
     tokio::select! {
-        _ = signal_terminate.recv() => info!("Received SIGTERM"),
-        _ = signal_interrupt.recv() => info!("Received SIGINT"),
+        _ = signal_terminate.recv() => info!(target="handle_signals", "Received SIGTERM"),
+        _ = signal_interrupt.recv() => info!(target="handle_signals", "Received SIGINT"),
     };
     Ok(())
 }
