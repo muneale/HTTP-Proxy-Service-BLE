@@ -24,12 +24,13 @@ This project implements a Bluetooth GATT HTTP Proxy Server (HPS) using Rust. It 
 
 1. Clone the repository:
     ```
-    git clone https://github.com/yourusername/ble-http-proxy-server.git
-    cd ble-http-proxy-server
+    git clone https://github.com/muneale/HTTP-Proxy-Service-BLE.git
+    cd HTTP-Proxy-Service-BLE
     ```
 
 2. Build the project:
     ```
+    mkdir target
     docker buildx build --platform linux/<ARCH> --no-cache --output=./target --target=artifacts -t build_rust .
     ```
     Make sure to replace __<ARCH>__ with one of the following: `arm64`, `amd64`, `arm/v7`.
