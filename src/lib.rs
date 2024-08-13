@@ -9,11 +9,14 @@ pub mod utils;
 pub use app_state::AppState;
 pub use config::Config;
 pub use error::Result;
+use tracing::info;
 pub use std::sync::Arc;
 
 pub async fn run(config: Config) -> Result<()> {
     // Initialize logger
     tracing_subscriber::fmt::init();
+
+    info!(target: "hps_ble", "Starting HPS BLE server with config: {:?}", &config);
 
     let state = Arc::new(AppState::new());
     let session = bluetooth::setup_bluetooth().await?;
