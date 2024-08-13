@@ -1,15 +1,14 @@
-use crate::app_state::AppState;
-use crate::error::AppError;
+use crate::{AppState, constants::MTU_OVERHEAD, Result};
 use byteorder::{LittleEndian, WriteBytesExt};
 use num_derive::FromPrimitive;
 use num_traits::FromPrimitive;
 use reqwest::Method;
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 use tracing::{debug, error};
 
 #[derive(Clone, Debug, Copy, FromPrimitive)]
 #[repr(u8)]
-enum HttpControlOption {
+pub enum HttpControlOption {
     Invalid = 0,
     Get = 1,
     Head = 2,
@@ -26,20 +25,20 @@ enum HttpControlOption {
 
 #[derive(Clone, Debug, Copy)]
 #[repr(u8)]
-enum HttpDataStatusBit {
+pub enum HttpDataStatusBit {
     HeadersReceived = 1,
     HeadersTruncated = 2,
     BodyReceived = 4,
     BodyTruncated = 8,
 }
 
-async fn handle_http_control_point(
+pub async fn handle_http_control_point(
     state: &Arc<AppState>,
     new_value: Vec<u8>,
     req: bluer::gatt::local::CharacteristicWriteRequest,
-    timeout: u64,
+    timeout: Duration,
     mtu: usize
-) -> Result<(), AppError> {
+) -> Result<()> {
     // Method and protocol
     let (method, protocol) = match new_value.first() {
         Some(&first) => match HttpControlOption::from_u8(first) {
@@ -84,7 +83,7 @@ async fn handle_http_control_point(
     let client = reqwest::Client::new();
     let mut req_builder = client
         .request(method, url)
-        .timeout(Duration::from_secs(timeout));
+        .timeout(timeout);
 
     for h in headers_str.split("\r\n") {
         if let Some(i) = h.find(':') {

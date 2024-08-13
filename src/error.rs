@@ -1,13 +1,17 @@
 use thiserror::Error;
 
+pub type Result<T> = std::result::Result<T, Error>;
+
 #[derive(Error, Debug)]
-pub enum AppError {
+pub enum Error {
     #[error("Bluetooth error: {0}")]
-    BluetoothError(#[from] bluer::Error),
+    Bluetooth(#[from] bluer::Error),
     #[error("HTTP request error: {0}")]
-    HttpError(#[from] reqwest::Error),
+    Http(#[from] reqwest::Error),
     #[error("I/O error: {0}")]
-    IoError(#[from] std::io::Error),
+    Io(#[from] std::io::Error),
     #[error("UTF-8 conversion error: {0}")]
-    Utf8Error(#[from] std::string::FromUtf8Error),
+    Utf8(#[from] std::string::FromUtf8Error),
+    #[error("Application error: {0}")]
+    Application(String),
 }

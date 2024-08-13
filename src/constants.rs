@@ -1,3 +1,4 @@
+use bluer::UuidExt;
 use once_cell::sync::Lazy;
 
 pub const MTU_OVERHEAD: usize = 3;
