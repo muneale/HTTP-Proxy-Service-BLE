@@ -2,3 +2,4 @@
 - Implement the CANCEL option from Control Point characteristic
 - Check if a request is already running
 - Implement multiple requests based on device ID (like obj UserRequest that contains each Vec, then a HashMap<BLE_UUID, UserRequest>)
+- Implement the continue HTTP codes (like 100,...)
