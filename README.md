@@ -49,7 +49,7 @@ Or with custom settings:
 
 ### Command-line Options
 
-- `--name`: Set the advertised name of the Bluetooth service (default: "Logbot-HPS")
+- `--name`: Set the advertised name of the Bluetooth service (default: "HPS")
 - `--timeout`: Set the HTTP request timeout in seconds (default: 60)
 - `--mtu`: Override the MTU size in bytes (default: 0, which uses the established MTU size)
 

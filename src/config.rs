@@ -4,7 +4,7 @@ use std::time::Duration;
 #[derive(Clone, Debug, Parser)]
 #[command(author, version, about, long_about = None)]
 pub struct Config {
-    #[arg(short, long, default_value = "Logbot-HPS", help = "Service name")]
+    #[arg(short, long, default_value = "HPS", help = "Service name")]
     pub name: String,
     #[arg(short, long, default_value = "60", help = "HTTP requests timeout in seconds")]
     pub timeout: u64,
