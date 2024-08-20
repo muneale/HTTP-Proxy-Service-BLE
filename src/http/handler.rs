@@ -39,6 +39,9 @@ pub async fn handle_http_control_point(
     timeout: Duration,
     mtu: usize
 ) -> Result<()> {
+    // Reset HTTP status code
+    let mut status_code = state.http_status_code.lock().await;
+    *status_code = Vec::new();
     // Method and protocol
     let (method, protocol) = match new_value.first() {
         Some(&first) => match HttpControlOption::from_u8(first) {
