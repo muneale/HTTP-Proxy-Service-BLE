@@ -35,10 +35,13 @@ pub fn create_characteristic(state: &Arc<AppState>) -> Characteristic {
                             debug!("Event {} triggered", HTTP_STATUS_CODE_UPDATED_EVENT);
                             let notifier = notifier.clone();
                             debug!("Notifying with value {:x?}", &*value);
-                            let _ = notifier.lock().then(|mut notifier| async move {
+                            futures::executor::block_on(async move {
+                                let mut notifier = notifier.lock().await;
                                 if let Err(err) = notifier.notify(value).await {
                                     warn!("Notification error: {}", &err);
+                                    return;
                                 }
+                                debug!("Notification sent")
                             });
                         });
                         debug!("Event {} intialized successfully", HTTP_STATUS_CODE_UPDATED_EVENT);       
