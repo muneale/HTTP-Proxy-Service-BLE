@@ -4,7 +4,7 @@ use num_derive::FromPrimitive;
 use num_traits::FromPrimitive;
 use reqwest::Method;
 use std::{sync::Arc, time::Duration};
-use tracing::{debug, error};
+use tracing::{debug, error, warn};
 
 #[derive(Clone, Debug, Copy, FromPrimitive)]
 #[repr(u8)]
@@ -103,7 +103,13 @@ pub async fn handle_http_control_point(
     }
 
     // Send request and handle response
-    let res = req_builder.send().await?;
+    let res = match req_builder.send().await {
+        Ok(res) => res,
+        Err(err) => {
+            warn!("Error during request: {}", err);
+            return Ok(());
+        },
+    };
     debug!("Response: {:?}", &res);
 
     let mut status = Vec::new();
