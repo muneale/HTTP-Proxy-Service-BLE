@@ -1,7 +1,12 @@
 use bluer::UuidExt;
+use event_emitter_rs::EventEmitter;
 use once_cell::sync::Lazy;
+use tokio::sync::Mutex;
 
 pub const MTU_OVERHEAD: usize = 3;
+pub const HTTP_STATUS_CODE_UPDATED_EVENT: &str = "http_status_code_updated";
+
+pub static EVENT_EMITTER: Lazy<Mutex<EventEmitter>> = Lazy::new(|| Mutex::new(EventEmitter::new()));
 
 pub static SERVICE_UUID: Lazy<uuid::Uuid> = Lazy::new(|| uuid::Uuid::from_u16(0x1823));
 pub static HTTP_URI_UUID: Lazy<uuid::Uuid> = Lazy::new(|| uuid::Uuid::from_u16(0x2AB6));

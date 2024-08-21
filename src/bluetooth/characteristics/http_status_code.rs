@@ -1,13 +1,12 @@
-use crate::{AppState, constants::HTTP_STATUS_CODE_UUID};
+use crate::{constants::{EVENT_EMITTER, HTTP_STATUS_CODE_UPDATED_EVENT, HTTP_STATUS_CODE_UUID}, AppState};
 use bluer::gatt::local::{Characteristic, CharacteristicRead, CharacteristicNotify, CharacteristicNotifyMethod};
 use futures::FutureExt;
 use std::sync::Arc;
-use tokio::time::{sleep, Duration};
+use tokio::sync::Mutex;
 use tracing::{debug, warn};
 
 pub fn create_characteristic(state: &Arc<AppState>) -> Characteristic {
     let state_r = state.clone();
-    let state_n = state.clone();
     Characteristic {
         uuid: *HTTP_STATUS_CODE_UUID,
         read: Some(CharacteristicRead {
@@ -25,29 +24,25 @@ pub fn create_characteristic(state: &Arc<AppState>) -> Characteristic {
         }),
         notify: Some(CharacteristicNotify {
             notify: true,
-            method: CharacteristicNotifyMethod::Fun(Box::new(move |mut notifier| {
-                let value = state_n.http_status_code.clone();
+            method: CharacteristicNotifyMethod::Fun(Box::new(move |notifier| {
+                let notifier = Arc::new(Mutex::new(notifier));
                 async move {
-                    tokio::spawn(async move {
-                        let mut previous_value = value.lock().await.clone();
-                        loop {
-                            {
-                                let value = value.lock().await.to_vec();
-                                debug!(target: "http_status_code", "Notifying with value {:x?} and previous value {:x?}", &*value, &previous_value);
-                                if previous_value == value {
-                                    debug!(target: "http_status_code", "Previous and current value are the same, skipping notification.");
-                                    break;
-                                }
-                                previous_value = value.clone();
+                   let listeners = EVENT_EMITTER.lock().await.listeners.len();
+                   debug!("Listeners for event {}: {}", HTTP_STATUS_CODE_UPDATED_EVENT, listeners);
+                   if listeners == 0 {
+                        debug!("Initializing event {}", HTTP_STATUS_CODE_UPDATED_EVENT);
+                        EVENT_EMITTER.lock().await.on(HTTP_STATUS_CODE_UPDATED_EVENT, move |value: Vec<u8>| {
+                            debug!("Event {} triggered", HTTP_STATUS_CODE_UPDATED_EVENT);
+                            let notifier = notifier.clone();
+                            debug!("Notifying with value {:x?}", &*value);
+                            let _ = notifier.lock().then(|mut notifier| async move {
                                 if let Err(err) = notifier.notify(value).await {
                                     warn!("Notification error: {}", &err);
-                                    break;
                                 }
-                                // previous_value = value.clone();
-                            }
-                            sleep(Duration::from_secs(1)).await;
-                        }
-                    });
+                            });
+                        });
+                        debug!("Event {} intialized successfully", HTTP_STATUS_CODE_UPDATED_EVENT);       
+                   }
                 }
                 .boxed()
             })),
