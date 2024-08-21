@@ -19,8 +19,18 @@
                     "kind": "bin"
                 }
             },
-            "args": [],
-            "cwd": "${workspaceFolder}"
+            "args": [
+                "--timeout",
+                "10",
+                "--name",
+                "DebugHPS",
+                "--mtu",
+                "100"
+            ],
+            "cwd": "${workspaceFolder}",
+            "env": {
+                "RUST_LOG": "debug"
+            }
         },
         {
             "type": "lldb",
