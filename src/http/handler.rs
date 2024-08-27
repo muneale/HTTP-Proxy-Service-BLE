@@ -107,6 +107,9 @@ pub async fn handle_http_control_point(
         Ok(res) => res,
         Err(err) => {
             warn!("Error during request: {}", err);
+            let mut status_values = state.http_status_code.lock().await;
+            *status_values = Vec::new();
+            EVENT_EMITTER.lock().await.emit(HTTP_STATUS_CODE_UPDATED_EVENT, &*status_values);
             return Ok(());
         },
     };
