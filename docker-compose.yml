@@ -1,0 +1,9 @@
+services:
+  rust:
+    container_name: rust
+    build:
+      context: .
+    tty: true
+    command: /bin/bash
+    volumes:
+      - ./target:/home/target

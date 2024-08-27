@@ -1,10 +1,10 @@
-use crate::{AppState, constants::MTU_OVERHEAD, Result};
+use crate::{constants::{EVENT_EMITTER, HTTP_STATUS_CODE_UPDATED_EVENT, MTU_OVERHEAD}, AppState, Result};
 use byteorder::{LittleEndian, WriteBytesExt};
 use num_derive::FromPrimitive;
 use num_traits::FromPrimitive;
 use reqwest::Method;
 use std::{sync::Arc, time::Duration};
-use tracing::{debug, error};
+use tracing::{debug, error, warn};
 
 #[derive(Clone, Debug, Copy, FromPrimitive)]
 #[repr(u8)]
@@ -53,30 +53,30 @@ pub async fn handle_http_control_point(
             Some(HttpControlOption::SecurePut) => (Method::PUT, "https"),
             Some(HttpControlOption::SecureDelete) => (Method::DELETE, "https"),
             Some(HttpControlOption::Cancel) => {
-                debug!(target="handle_http_control_point", "Request cancelled");
+                debug!("Request cancelled");
                 return Ok(());
             }
             _ => {
-                error!(target="handle_http_control_point", "Invalid method");
+                error!("Invalid method");
                 return Ok(());
             }
         },
         None => {
-            error!(target="handle_http_control_point", "No method provided");
+            error!("No method provided");
             return Ok(());
         }
     };
 
-    debug!(target="handle_http_control_point", "Method: '{}', Protocol: '{}'", method, protocol);
+    debug!("Method: '{}', Protocol: '{}'", method, protocol);
 
     // URL
     let address = String::from_utf8(state.http_uri.lock().await.clone())?;
     if address.is_empty() {
-        error!(target="handle_http_control_point", "No URL provided");
+        error!("No URL provided");
         return Ok(());
     }
     let url = format!("{}://{}", protocol, address);
-    debug!(target="handle_http_control_point", "Sending request to '{}'", url);
+    debug!("Sending request to '{}'", url);
 
     // Headers
     let headers_str = String::from_utf8(state.http_headers.lock().await.clone())?;
@@ -90,21 +90,30 @@ pub async fn handle_http_control_point(
             let (header_key, header_value) = h.split_at(i);
             let header_key = header_key.trim();
             let header_value = header_value[1..].trim(); // Skip the ':' and trim
-            debug!(target="handle_http_control_point", "Header: '{}: {}'", header_key, header_value);
+            debug!("Header: '{}: {}'", header_key, header_value);
             req_builder = req_builder.header(header_key, header_value);
         }
     }
 
     // Body
     let body = String::from_utf8(state.http_entity_body.lock().await.clone())?;
-    debug!(target="handle_http_control_point", "Body: '{}'", body);
+    debug!("Body: '{}'", body);
     if !body.is_empty() {
         req_builder = req_builder.body(body);
     }
 
     // Send request and handle response
-    let res = req_builder.send().await?;
-    debug!(target="handle_http_control_point", "Response: {:?}", &res);
+    let res = match req_builder.send().await {
+        Ok(res) => res,
+        Err(err) => {
+            warn!("Error during request: {}", err);
+            let mut status_values = state.http_status_code.lock().await;
+            *status_values = Vec::new();
+            EVENT_EMITTER.lock().await.emit(HTTP_STATUS_CODE_UPDATED_EVENT, &*status_values);
+            return Ok(());
+        },
+    };
+    debug!("Response: {:?}", &res);
 
     let mut status = Vec::new();
     status.write_u16::<LittleEndian>(res.status().as_u16())?;
@@ -118,6 +127,7 @@ pub async fn handle_http_control_point(
 
     let mut header_values = state.http_headers.lock().await;
     *header_values = headers_str.into_bytes();
+    debug!("Updated HTTP Headers");
 
     let mtu = if mtu > 0 && mtu < req.mtu as usize { mtu } else { req.mtu as usize - MTU_OVERHEAD };
     let headers_status = if header_values.len() <= mtu {
@@ -130,6 +140,7 @@ pub async fn handle_http_control_point(
     let body_bytes = res.bytes().await?;
     let mut body_values = state.http_entity_body.lock().await;
     *body_values = body_bytes.to_vec();
+    debug!("Updated HTTP Entity Body");
 
     // Set headers, body and MTU sizes
     let mut headers_body_sizes = Vec::new();
@@ -155,8 +166,11 @@ pub async fn handle_http_control_point(
     // Write HTTP response code
     let mut status_values = state.http_status_code.lock().await;
     *status_values = status;
+    debug!("Updated HTTP Status code");
 
-    debug!(target="handle_http_control_point", "Write request {:?} completed", &req);
+    EVENT_EMITTER.lock().await.emit(HTTP_STATUS_CODE_UPDATED_EVENT, &*status_values);
+
+    debug!("Write request {:?} completed", &req);
 
     Ok(())
 }
