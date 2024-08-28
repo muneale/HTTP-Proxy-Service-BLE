@@ -66,7 +66,6 @@ pub async fn handle_http_control_point(
             return Ok(());
         }
     };
-
     debug!("Method: '{}', Protocol: '{}'", method, protocol);
 
     // URL
@@ -117,6 +116,7 @@ pub async fn handle_http_control_point(
 
     let mut status = Vec::new();
     status.write_u16::<LittleEndian>(res.status().as_u16())?;
+    debug!("Status code: {}", res.status().as_u16());
 
     // Write headers into buffer
     let headers_str = res
@@ -124,6 +124,7 @@ pub async fn handle_http_control_point(
         .iter()
         .map(|(k, v)| format!("{}: {}\r\n", k.as_str(), v.to_str().unwrap_or("")))
         .collect::<String>();
+    debug!("Headers: {}", headers_str);
 
     let mut header_values = state.http_headers.lock().await;
     *header_values = headers_str.into_bytes();
@@ -135,9 +136,12 @@ pub async fn handle_http_control_point(
     } else {
         HttpDataStatusBit::HeadersTruncated as u8
     };
+    debug!("Headers status: {}", headers_status);
 
     // Write body into buffer
     let body_bytes = res.bytes().await?;
+    debug!("Body: {:?}", body_bytes);
+    
     let mut body_values = state.http_entity_body.lock().await;
     *body_values = body_bytes.to_vec();
     debug!("Updated HTTP Entity Body");
@@ -148,6 +152,8 @@ pub async fn handle_http_control_point(
     headers_body_sizes.write_u32::<LittleEndian>(header_values.len() as u32)?;
     headers_body_sizes.write_u32::<LittleEndian>(body_values.len() as u32)?;
     headers_body_sizes.write_u32::<LittleEndian>(mtu as u32)?;
+    debug!("Headers and body sizes: {:?}", headers_body_sizes);
+
     let mut byte_headers_body_sizes_values = state.http_headers_body_sizes.lock().await;
     *byte_headers_body_sizes_values = headers_body_sizes;
 
@@ -162,6 +168,7 @@ pub async fn handle_http_control_point(
         HttpDataStatusBit::BodyTruncated as u8
     };
     status.push(headers_status | body_status);
+    debug!("Status: {:?}", status);
 
     // Write HTTP response code
     let mut status_values = state.http_status_code.lock().await;
